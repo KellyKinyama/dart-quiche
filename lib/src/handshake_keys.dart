@@ -7,9 +7,10 @@
 // secrets and wraps them as [Open]/[Seal] pairs ready to drop into a
 // [CryptoContext].
 //
-// Hash and AEAD are pinned to SHA-256 + AES-128-GCM (cipher suite
-// TLS_AES_128_GCM_SHA256, 0x1301) — the only suite negotiated by
-// `pure_dart_quic`'s TLS server today.
+// Supports all three TLS 1.3 cipher suites that QUIC v1 may negotiate:
+//   * TLS_AES_128_GCM_SHA256       (0x1301) — SHA-256 transcript.
+//   * TLS_AES_256_GCM_SHA384       (0x1302) — SHA-384 transcript.
+//   * TLS_CHACHA20_POLY1305_SHA256 (0x1303) — SHA-256 transcript.
 
 import 'dart:typed_data';
 
@@ -55,12 +56,37 @@ final Uint8List _emptyHashSha256 = Uint8List.fromList(const [
   0x55,
 ]);
 
+/// SHA-384("") — needed by the TLS 1.3 key schedule when the
+/// negotiated cipher suite is TLS_AES_256_GCM_SHA384 (0x1302).
+final Uint8List _emptyHashSha384 = Uint8List.fromList(const [
+  0x38, 0xb0, 0x60, 0xa7, 0x51, 0xac, 0x96, 0x38, //
+  0x4c, 0xd9, 0x32, 0x7e, 0xb1, 0xb1, 0xe3, 0x6a,
+  0x21, 0xfd, 0xb7, 0x11, 0x14, 0xbe, 0x07, 0x43,
+  0x4c, 0x0c, 0xc7, 0xbf, 0x63, 0xf6, 0xe1, 0xda,
+  0x27, 0x4e, 0xde, 0xbf, 0xe7, 0x6f, 0x65, 0xfb,
+  0xd5, 0x1a, 0xd2, 0xf1, 0x48, 0x98, 0xb9, 0x5b,
+]);
+
 Uint8List _bytes(String s) => Uint8List.fromList(s.codeUnits);
 
 Uint8List _sha256(Uint8List data) {
   final d = pc.SHA256Digest();
   return d.process(data);
 }
+
+Uint8List _sha384(Uint8List data) {
+  final d = pc.SHA384Digest();
+  return d.process(data);
+}
+
+/// Hash function and empty-string hash for a TLS 1.3 cipher suite.
+bool _isSha384(Algorithm alg) => alg == Algorithm.aes256Gcm;
+int _hashLenFor(Algorithm alg) => _isSha384(alg) ? 48 : 32;
+Uint8List _emptyHashFor(Algorithm alg) =>
+    _isSha384(alg) ? _emptyHashSha384 : _emptyHashSha256;
+pc.Digest _digestFor(Algorithm alg) =>
+    _isSha384(alg) ? pc.SHA384Digest() : pc.SHA256Digest();
+int _hmacBlockFor(Algorithm alg) => _isSha384(alg) ? 128 : 64;
 
 /// All TLS 1.3 traffic secrets derived from a single handshake.
 ///
@@ -111,12 +137,8 @@ class HandshakeSecrets {
     required Uint8List transcriptHashAfterServerFinished,
     Algorithm alg = Algorithm.aes128Gcm,
   }) {
-    assert(
-      alg == Algorithm.aes128Gcm || alg == Algorithm.chacha20Poly1305,
-      'HandshakeSecrets currently only supports SHA-256 cipher suites '
-      '(TLS_AES_128_GCM_SHA256 / TLS_CHACHA20_POLY1305_SHA256)',
-    );
-    final hashLen = 32;
+    final hashLen = _hashLenFor(alg);
+    final emptyHash = _emptyHashFor(alg);
     final zeros = Uint8List(hashLen);
 
     // early_secret = HKDF-Extract(salt=0, IKM=0^HashLen)
@@ -128,7 +150,7 @@ class HandshakeSecrets {
       earlySecret,
       _bytes('derived'),
       hashLen,
-      context: _emptyHashSha256,
+      context: emptyHash,
     );
 
     // handshake_secret = HKDF-Extract(salt=derived1, IKM=ECDHE)
@@ -155,7 +177,7 @@ class HandshakeSecrets {
       handshakeSecret,
       _bytes('derived'),
       hashLen,
-      context: _emptyHashSha256,
+      context: emptyHash,
     );
 
     // master_secret = HKDF-Extract(salt=derived2, IKM=0^HashLen)
@@ -190,8 +212,12 @@ class HandshakeSecrets {
 
   /// Per-RFC 8446 §4.4.4: `finished_key = HKDF-Expand-Label(BaseKey,
   /// "finished", "", HashLen)`.
-  Uint8List finishedKey(Uint8List trafficSecret) =>
-      hkdfExpandLabel(alg, trafficSecret, _bytes('finished'), 32);
+  Uint8List finishedKey(Uint8List trafficSecret) => hkdfExpandLabel(
+    alg,
+    trafficSecret,
+    _bytes('finished'),
+    _hashLenFor(alg),
+  );
 
   /// Computes the TLS 1.3 Finished `verify_data` over [transcriptHash].
   /// `HMAC(finished_key, transcript_hash)`.
@@ -199,7 +225,7 @@ class HandshakeSecrets {
     required Uint8List trafficSecret,
     required Uint8List transcriptHash,
   }) {
-    final hmac = pc.HMac(pc.SHA256Digest(), 64)
+    final hmac = pc.HMac(_digestFor(alg), _hmacBlockFor(alg))
       ..init(pc.KeyParameter(finishedKey(trafficSecret)));
     return hmac.process(transcriptHash);
   }
@@ -233,8 +259,12 @@ class HandshakeSecrets {
     );
   }
 
-  /// Convenience: SHA-256 of [data].
-  static Uint8List transcriptHash(Uint8List data) => _sha256(data);
+  /// Convenience: hash of [data] under the suite's transcript hash
+  /// function (SHA-256 by default, SHA-384 for AES_256_GCM_SHA384).
+  static Uint8List transcriptHash(
+    Uint8List data, {
+    Algorithm alg = Algorithm.aes128Gcm,
+  }) => _isSha384(alg) ? _sha384(data) : _sha256(data);
 }
 
 /// Installs derived TLS-1.3 packet protection keys into the per-epoch

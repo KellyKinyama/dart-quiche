@@ -359,22 +359,24 @@ class TlsClientDriver {
           final bodyLen = (shBytes[1] << 16) | (shBytes[2] << 8) | shBytes[3];
           final body = Uint8List.sublistView(shBytes, 4, 4 + bodyLen);
           final sh = ServerHello.parse(QuicBuffer(data: body));
-          // pure_dart_quic's key schedule supports the two SHA-256-based
-          // TLS 1.3 suites (TLS_AES_128_GCM_SHA256 / 0x1301 and
-          // TLS_CHACHA20_POLY1305_SHA256 / 0x1303). TLS_AES_256_GCM_SHA384
-          // (0x1302) would need a SHA-384 transcript path — reject it for
-          // now rather than silently producing garbage keys.
+          // dart-quiche's key schedule now supports the three TLS 1.3
+          // suites that share the QUIC AEAD set: SHA-256 with
+          // AES-128-GCM (0x1301) or ChaCha20-Poly1305 (0x1303), and
+          // SHA-384 with AES-256-GCM (0x1302).
           final Algorithm negotiatedAlg;
           switch (sh.cipherSuite) {
             case 0x1301:
               negotiatedAlg = Algorithm.aes128Gcm;
+            case 0x1302:
+              negotiatedAlg = Algorithm.aes256Gcm;
             case 0x1303:
               negotiatedAlg = Algorithm.chacha20Poly1305;
             default:
               throw StateError(
                 'unsupported TLS cipher suite '
                 '0x${sh.cipherSuite.toRadixString(16)} '
-                '(only TLS_AES_128_GCM_SHA256 / 0x1301 and '
+                '(only TLS_AES_128_GCM_SHA256 / 0x1301, '
+                'TLS_AES_256_GCM_SHA384 / 0x1302 and '
                 'TLS_CHACHA20_POLY1305_SHA256 / 0x1303 are implemented)',
               );
           }
@@ -388,6 +390,7 @@ class TlsClientDriver {
           _sharedSecret = shared;
           final transcriptAfterSh = HandshakeSecrets.transcriptHash(
             Uint8List.fromList([..._chBytes!, ...shBytes]),
+            alg: negotiatedAlg,
           );
           final s = HandshakeSecrets.derive(
             sharedSecret: shared,
@@ -431,6 +434,7 @@ class TlsClientDriver {
             flightBytes: flightBytes,
             chBytes: _chBytes!,
             shBytes: _shBytes!,
+            alg: _negotiatedAlg!,
           );
 
           // RFC 6125 §6 — having authenticated the leaf cert, check
@@ -468,6 +472,7 @@ class TlsClientDriver {
               ..._shBytes!,
               ...Uint8List.sublistView(flightBytes, 0, cvEnd),
             ]),
+            alg: _negotiatedAlg!,
           );
           final expectedServerFinished = secrets!.finishedVerifyData(
             trafficSecret: secrets!.sHandshakeTraffic,
@@ -478,6 +483,7 @@ class TlsClientDriver {
           }
           final transcriptAfterServerFinished = HandshakeSecrets.transcriptHash(
             Uint8List.fromList([..._chBytes!, ..._shBytes!, ...flightBytes]),
+            alg: _negotiatedAlg!,
           );
           // RFC 8446 §7.1: re-derive app secrets with the transcript
           // hash that INCLUDES server Finished, then re-install 1-RTT
@@ -485,6 +491,7 @@ class TlsClientDriver {
           // transcript and would yield mismatched keys / HP mask.)
           final transcriptAfterShOnly = HandshakeSecrets.transcriptHash(
             Uint8List.fromList([..._chBytes!, ..._shBytes!]),
+            alg: _negotiatedAlg!,
           );
           final s2 = HandshakeSecrets.derive(
             sharedSecret: _sharedSecret!,
@@ -651,16 +658,19 @@ void verifyServerCertificateVerifyForTesting({
   required Uint8List flightBytes,
   required Uint8List chBytes,
   required Uint8List shBytes,
+  Algorithm alg = Algorithm.aes128Gcm,
 }) => _verifyServerCertificateVerify(
   flightBytes: flightBytes,
   chBytes: chBytes,
   shBytes: shBytes,
+  alg: alg,
 );
 
 void _verifyServerCertificateVerify({
   required Uint8List flightBytes,
   required Uint8List chBytes,
   required Uint8List shBytes,
+  required Algorithm alg,
 }) {
   final msgs = _splitHandshakeMessages(flightBytes);
   if (msgs.length < 3) {
@@ -697,6 +707,7 @@ void _verifyServerCertificateVerify({
 
   final transcriptThroughCert = HandshakeSecrets.transcriptHash(
     Uint8List.fromList([...chBytes, ...shBytes, ...throughCert]),
+    alg: alg,
   );
 
   // signed content = 64 octets of 0x20 || "TLS 1.3, server
