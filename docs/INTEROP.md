@@ -61,8 +61,12 @@ dart test
 codec, QPACK, h3, TLS key schedule (all three QUIC v1 cipher suites:
 `TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`,
 `TLS_CHACHA20_POLY1305_SHA256`), Retry / VN helpers, the RFC 9000
-§8.1 server-side anti-amplification limit, and QUIC v2 (RFC 9369)
-version dispatch + v2 Retry integrity.
+§8.1 server-side anti-amplification limit, QUIC v2 (RFC 9369)
+version dispatch + v2 Retry integrity, and the full client-side
+0-RTT primitives (NewSessionTicket parse, resumption_master_secret
+derivation, PSK binder HMAC, ClientHello `pre_shared_key` /
+`early_data` emit, and long-header 0-RTT packet send). Current
+count: **419**.
 
 ## Remaining gaps
 
@@ -82,10 +86,18 @@ Ordered by impact:
    delivered). The probe now hex-dumps the failing datagram so the
    next reproduction will surface its wire content.
 
-3. **0-RTT.** `Connection(initialToken:)` and `NEW_TOKEN` parsing /
-   storage are already in place. Missing: persisting transport
-   parameters + traffic secret + ALPN at session-close and replaying
-   them on the next Initial.
+3. **0-RTT replay (server-side acceptor).** Client-side primitives
+   are now complete: `SessionTicket.parse`,
+   `HandshakeSecrets.resumptionMasterSecret`,
+   `HandshakeSecrets.pskBinder`, `TlsClientDriver(resumption:)`
+   that emits a ClientHello with a valid `pre_shared_key` +
+   `early_data` offer, and `Connection.enableZeroRttSend` that
+   routes application-epoch sends through long-header 0-RTT
+   packets. What's still missing for actual replay is the
+   *server-side* PSK acceptance path (parse `pre_shared_key`,
+   verify binder, install early-data Open, accept `early_data`),
+   plus a public-Internet probe variant that retries with the
+   harvested ticket on a second connection.
 
 4. **Connection migration — active socket swap.** `PATH_CHALLENGE` /
    `PATH_RESPONSE` are wired in the connection state machine
@@ -94,6 +106,18 @@ Ordered by impact:
    an app-layer concern and not exercised by the probe.
 
 ## Recently closed
+
+- **0-RTT client-side primitives (RFC 9001 §4.6 / RFC 8446 §4.2.11).**
+  Server-issued NewSessionTicket parse + `ResumptionState` bundling
+  (`b4186f7`, `afad2fb`); `HandshakeSecrets.pskBinder` and
+  `resumptionBinderKey` (`cd97b73`); `TlsClientDriver(resumption:)`
+  stages a CH carrying `pre_shared_key` (last extension) +
+  `early_data` with a binder HMAC computed over the truncated CH
+  (`59ca43a`); `Connection.enableZeroRttSend` installs the client
+  early-data Seal and emits long-header 0-RTT (type 0x01) packets
+  on the application epoch (`c5ffd57`). Companion pure-dart-quic
+  commits: `20e8782` (`buildClientHelloWithPsk` + `PskOffer`).
+  Server-side PSK accept path remains.
 
 - **Anti-amplification (RFC 9000 §8.1).** Server now refuses to send
   more than 3× the bytes received from an unvalidated peer; address

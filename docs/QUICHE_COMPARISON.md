@@ -34,7 +34,7 @@ means partial / not wired into the public surface; ❌ means absent.
 | ECDSA-P256-SHA256 / RSA-PSS-RSAE-SHA256 verify | ✅ | ✅ |
 | Header protection (AES + ChaCha20 mask) | ✅ | ✅ |
 | Key update (1-RTT) | ✅ | ✅ (v1 + v2 labels) |
-| 0-RTT (early data) | ✅ | ❌ keys + `NEW_TOKEN` parsing in place, session resumption not persisted |
+| 0-RTT (early data) | ✅ | 🟡 client-side complete (NST parse, PSK binder, CH `pre_shared_key`+`early_data`, long-header 0-RTT send); server-side PSK acceptor pending |
 | PKI chain validation against system trust store | ✅ via BoringSSL | ❌ leaf SAN + sig only |
 
 ## Transport
