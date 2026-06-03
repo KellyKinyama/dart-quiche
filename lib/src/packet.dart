@@ -144,18 +144,24 @@ class Header {
     if (version == 0) {
       ty = PacketType.versionNegotiation;
     } else {
-      switch ((first & typeMask) >> 4) {
+      final tyBits = (first & typeMask) >> 4;
+      // RFC 9369 §3.2 — v2 cyclically shifts the long-header type
+      // code points (Initial=1, 0-RTT=2, Handshake=3, Retry=0) so an
+      // off-path attacker cannot inject v1 packets that a v2 endpoint
+      // would treat as a different type (and vice versa).
+      final isV2 = version == protocolVersionV2;
+      switch (tyBits) {
         case 0x00:
-          ty = PacketType.initial;
+          ty = isV2 ? PacketType.retry : PacketType.initial;
           break;
         case 0x01:
-          ty = PacketType.zeroRTT;
+          ty = isV2 ? PacketType.initial : PacketType.zeroRTT;
           break;
         case 0x02:
-          ty = PacketType.handshake;
+          ty = isV2 ? PacketType.zeroRTT : PacketType.handshake;
           break;
         case 0x03:
-          ty = PacketType.retry;
+          ty = isV2 ? PacketType.handshake : PacketType.retry;
           break;
         default:
           throw QuicError.invalidPacket;
@@ -230,18 +236,19 @@ class Header {
     }
 
     final int tyBits;
+    final bool isV2 = version == protocolVersionV2;
     switch (ty) {
       case PacketType.initial:
-        tyBits = 0x00;
+        tyBits = isV2 ? 0x01 : 0x00;
         break;
       case PacketType.zeroRTT:
-        tyBits = 0x01;
+        tyBits = isV2 ? 0x02 : 0x01;
         break;
       case PacketType.handshake:
-        tyBits = 0x02;
+        tyBits = isV2 ? 0x03 : 0x02;
         break;
       case PacketType.retry:
-        tyBits = 0x03;
+        tyBits = isV2 ? 0x00 : 0x03;
         break;
       case PacketType.versionNegotiation:
       case PacketType.short:
@@ -447,14 +454,29 @@ const List<int> _retryIntegrityNonceV1 = [
   0xbb,
 ];
 
+// RFC 9369 §3.3.3 — QUIC v2 Retry integrity key + nonce.
+const List<int> _retryIntegrityKeyV2 = [
+  0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2, //
+  0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92,
+];
+
+const List<int> _retryIntegrityNonceV2 = [
+  0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99, //
+  0x90, 0xef, 0xb0, 0x4a,
+];
+
 Uint8List _computeRetryIntegrityTag(
   Uint8List headerBytes,
   Uint8List odcid,
   int version,
 ) {
-  // V1 is the only supported version; future versions would dispatch here.
-  final key = Uint8List.fromList(_retryIntegrityKeyV1);
-  final nonce = Uint8List.fromList(_retryIntegrityNonceV1);
+  final isV2 = version == protocolVersionV2;
+  final key = Uint8List.fromList(
+    isV2 ? _retryIntegrityKeyV2 : _retryIntegrityKeyV1,
+  );
+  final nonce = Uint8List.fromList(
+    isV2 ? _retryIntegrityNonceV2 : _retryIntegrityNonceV1,
+  );
 
   final pseudo = Uint8List(1 + odcid.length + headerBytes.length);
   pseudo[0] = odcid.length;

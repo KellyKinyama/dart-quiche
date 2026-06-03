@@ -15,7 +15,7 @@ import 'dart:typed_data';
 import 'package:pointycastle/export.dart' as pc;
 
 import 'error.dart';
-import 'packet_type.dart' show Epoch;
+import 'packet_type.dart' show Epoch, protocolVersionV1, protocolVersionV2;
 
 /// All AEAD algorithms used by QUIC have 96-bit nonces.
 const int maxNonceLen = 12;
@@ -45,6 +45,13 @@ final Uint8List initialSaltV1 = Uint8List.fromList(const [
   0xbb,
   0x7f,
   0x0a,
+]);
+
+/// RFC 9369 §3.3.1 initial salt for QUIC v2 (0x6b3343cf).
+final Uint8List initialSaltV2 = Uint8List.fromList(const [
+  0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, //
+  0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb,
+  0xf9, 0xbd, 0x2e, 0xd9,
 ]);
 
 /// QUIC encryption level. Mirrors Rust's `crypto::Level`.
@@ -156,20 +163,53 @@ final Uint8List _labelPktIv = Uint8List.fromList(ascii.encode('quic iv'));
 final Uint8List _labelHdrKey = Uint8List.fromList(ascii.encode('quic hp'));
 final Uint8List _labelKeyUpdate = Uint8List.fromList(ascii.encode('quic ku'));
 
-Uint8List derivePktKey(Algorithm alg, Uint8List secret) =>
-    hkdfExpandLabel(alg, secret, _labelPktKey, alg.keyLen);
+// RFC 9369 §3.3.2 — QUIC v2 renames the four packet-protection labels.
+// "client in" / "server in" are unchanged.
+final Uint8List _labelPktKeyV2 =
+    Uint8List.fromList(ascii.encode('quicv2 key'));
+final Uint8List _labelPktIvV2 = Uint8List.fromList(ascii.encode('quicv2 iv'));
+final Uint8List _labelHdrKeyV2 = Uint8List.fromList(ascii.encode('quicv2 hp'));
+final Uint8List _labelKeyUpdateV2 =
+    Uint8List.fromList(ascii.encode('quicv2 ku'));
 
-Uint8List derivePktIv(Algorithm alg, Uint8List secret) =>
-    hkdfExpandLabel(alg, secret, _labelPktIv, alg.nonceLen);
+Uint8List _pktKeyLabelFor(int version) =>
+    version == protocolVersionV2 ? _labelPktKeyV2 : _labelPktKey;
+Uint8List _pktIvLabelFor(int version) =>
+    version == protocolVersionV2 ? _labelPktIvV2 : _labelPktIv;
+Uint8List _hdrKeyLabelFor(int version) =>
+    version == protocolVersionV2 ? _labelHdrKeyV2 : _labelHdrKey;
+Uint8List _keyUpdateLabelFor(int version) =>
+    version == protocolVersionV2 ? _labelKeyUpdateV2 : _labelKeyUpdate;
 
-Uint8List deriveHdrKey(Algorithm alg, Uint8List secret) =>
-    hkdfExpandLabel(alg, secret, _labelHdrKey, alg.keyLen);
+Uint8List derivePktKey(
+  Algorithm alg,
+  Uint8List secret, {
+  int version = protocolVersionV1,
+}) => hkdfExpandLabel(alg, secret, _pktKeyLabelFor(version), alg.keyLen);
 
-Uint8List deriveNextSecret(Algorithm alg, Uint8List secret) =>
-    hkdfExpandLabel(alg, secret, _labelKeyUpdate, secret.length);
+Uint8List derivePktIv(
+  Algorithm alg,
+  Uint8List secret, {
+  int version = protocolVersionV1,
+}) => hkdfExpandLabel(alg, secret, _pktIvLabelFor(version), alg.nonceLen);
 
-Uint8List deriveInitialSecret(Uint8List cid, int version) =>
-    hkdfExtract(Algorithm.aes128Gcm, cid, initialSaltV1);
+Uint8List deriveHdrKey(
+  Algorithm alg,
+  Uint8List secret, {
+  int version = protocolVersionV1,
+}) => hkdfExpandLabel(alg, secret, _hdrKeyLabelFor(version), alg.keyLen);
+
+Uint8List deriveNextSecret(
+  Algorithm alg,
+  Uint8List secret, {
+  int version = protocolVersionV1,
+}) => hkdfExpandLabel(alg, secret, _keyUpdateLabelFor(version), secret.length);
+
+Uint8List deriveInitialSecret(Uint8List cid, int version) => hkdfExtract(
+  Algorithm.aes128Gcm,
+  cid,
+  version == protocolVersionV2 ? initialSaltV2 : initialSaltV1,
+);
 
 Uint8List deriveClientInitialSecret(Algorithm alg, Uint8List prk) =>
     hkdfExpandLabel(alg, prk, _labelClientIn, alg._digestSize);
@@ -239,8 +279,15 @@ class PacketKey {
     }
   }
 
-  factory PacketKey.fromSecret(Algorithm alg, Uint8List secret) =>
-      PacketKey(alg, derivePktKey(alg, secret), derivePktIv(alg, secret));
+  factory PacketKey.fromSecret(
+    Algorithm alg,
+    Uint8List secret, {
+    int version = protocolVersionV1,
+  }) => PacketKey(
+    alg,
+    derivePktKey(alg, secret, version: version),
+    derivePktIv(alg, secret, version: version),
+  );
 
   /// Encrypt `plaintext` with AAD `ad` and packet number `counter`.
   /// Returns ciphertext concatenated with the 16-byte tag.
@@ -284,8 +331,14 @@ class HeaderProtectionKey {
 
   HeaderProtectionKey(this.alg, this.key);
 
-  factory HeaderProtectionKey.fromSecret(Algorithm alg, Uint8List secret) =>
-      HeaderProtectionKey(alg, deriveHdrKey(alg, secret));
+  factory HeaderProtectionKey.fromSecret(
+    Algorithm alg,
+    Uint8List secret, {
+    int version = protocolVersionV1,
+  }) => HeaderProtectionKey(
+    alg,
+    deriveHdrKey(alg, secret, version: version),
+  );
 
   /// Derive the 5-byte HP mask from a 16-byte ciphertext sample.
   Uint8List newMask(Uint8List sample) {
@@ -380,13 +433,25 @@ class Open {
   final HeaderProtectionKey header;
   final PacketKey packet;
 
-  Open(this.alg, this.secret, this.header, this.packet);
+  /// QUIC version this key set was derived for. Determines which
+  /// HKDF-Expand-Label namespace the key-update path uses (RFC 9369
+  /// §3.3.2: v2 swaps "quic ku" for "quicv2 ku"). Defaults to v1 for
+  /// backwards compatibility with call sites that predate v2 support.
+  final int version;
 
-  factory Open.fromSecret(Algorithm alg, Uint8List secret) => Open(
+  Open(this.alg, this.secret, this.header, this.packet,
+      {this.version = protocolVersionV1});
+
+  factory Open.fromSecret(
+    Algorithm alg,
+    Uint8List secret, {
+    int version = protocolVersionV1,
+  }) => Open(
     alg,
     Uint8List.fromList(secret),
-    HeaderProtectionKey.fromSecret(alg, secret),
-    PacketKey.fromSecret(alg, secret),
+    HeaderProtectionKey.fromSecret(alg, secret, version: version),
+    PacketKey.fromSecret(alg, secret, version: version),
+    version: version,
   );
 
   factory Open.fromKeys({
@@ -395,11 +460,13 @@ class Open {
     required Uint8List iv,
     required Uint8List hpKey,
     required Uint8List secret,
+    int version = protocolVersionV1,
   }) => Open(
     alg,
     Uint8List.fromList(secret),
     HeaderProtectionKey(alg, hpKey),
     PacketKey(alg, key, iv),
+    version: version,
   );
 
   Uint8List newMask(Uint8List sample) => header.newMask(sample);
@@ -410,8 +477,14 @@ class Open {
   /// Key update — derive a new Open with the next packet-protection key.
   /// Header-protection key is unchanged per RFC 9001 §6.
   Open deriveNextPacketKey() {
-    final nextSecret = deriveNextSecret(alg, secret);
-    return Open(alg, nextSecret, header, PacketKey.fromSecret(alg, nextSecret));
+    final nextSecret = deriveNextSecret(alg, secret, version: version);
+    return Open(
+      alg,
+      nextSecret,
+      header,
+      PacketKey.fromSecret(alg, nextSecret, version: version),
+      version: version,
+    );
   }
 }
 
@@ -422,13 +495,22 @@ class Seal {
   final HeaderProtectionKey header;
   final PacketKey packet;
 
-  Seal(this.alg, this.secret, this.header, this.packet);
+  /// See [Open.version].
+  final int version;
 
-  factory Seal.fromSecret(Algorithm alg, Uint8List secret) => Seal(
+  Seal(this.alg, this.secret, this.header, this.packet,
+      {this.version = protocolVersionV1});
+
+  factory Seal.fromSecret(
+    Algorithm alg,
+    Uint8List secret, {
+    int version = protocolVersionV1,
+  }) => Seal(
     alg,
     Uint8List.fromList(secret),
-    HeaderProtectionKey.fromSecret(alg, secret),
-    PacketKey.fromSecret(alg, secret),
+    HeaderProtectionKey.fromSecret(alg, secret, version: version),
+    PacketKey.fromSecret(alg, secret, version: version),
+    version: version,
   );
 
   factory Seal.fromKeys({
@@ -437,11 +519,13 @@ class Seal {
     required Uint8List iv,
     required Uint8List hpKey,
     required Uint8List secret,
+    int version = protocolVersionV1,
   }) => Seal(
     alg,
     Uint8List.fromList(secret),
     HeaderProtectionKey(alg, hpKey),
     PacketKey(alg, key, iv),
+    version: version,
   );
 
   Uint8List newMask(Uint8List sample) => header.newMask(sample);
@@ -453,14 +537,20 @@ class Seal {
   ) => packet.seal(counter, ad, plaintext);
 
   Seal deriveNextPacketKey() {
-    final nextSecret = deriveNextSecret(alg, secret);
-    return Seal(alg, nextSecret, header, PacketKey.fromSecret(alg, nextSecret));
+    final nextSecret = deriveNextSecret(alg, secret, version: version);
+    return Seal(
+      alg,
+      nextSecret,
+      header,
+      PacketKey.fromSecret(alg, nextSecret, version: version),
+      version: version,
+    );
   }
 }
 
 /// Builds the Initial Open + Seal pair for the given DCID and side.
-/// Mirrors Rust's `derive_initial_key_material`. `version` is currently
-/// ignored (only QUIC v1 is supported here).
+/// Mirrors Rust's `derive_initial_key_material`. Picks the v1 or v2
+/// salt + HKDF label namespace based on [version] (RFC 9369 §3.3).
 (Open, Seal) deriveInitialKeyMaterial({
   required Uint8List cid,
   required int version,
@@ -472,12 +562,12 @@ class Seal {
   final serverSecret = deriveServerInitialSecret(aead, initialSecret);
   if (isServer) {
     return (
-      Open.fromSecret(aead, clientSecret),
-      Seal.fromSecret(aead, serverSecret),
+      Open.fromSecret(aead, clientSecret, version: version),
+      Seal.fromSecret(aead, serverSecret, version: version),
     );
   }
   return (
-    Open.fromSecret(aead, serverSecret),
-    Seal.fromSecret(aead, clientSecret),
+    Open.fromSecret(aead, serverSecret, version: version),
+    Seal.fromSecret(aead, clientSecret, version: version),
   );
 }

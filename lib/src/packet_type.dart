@@ -60,4 +60,8 @@ const int maxCidLen = 20;
 /// QUIC v1 protocol version.
 const int protocolVersionV1 = 0x00000001;
 
-bool versionIsSupported(int version) => version == protocolVersionV1;
+/// QUIC v2 protocol version (RFC 9369 §3.1).
+const int protocolVersionV2 = 0x6b3343cf;
+
+bool versionIsSupported(int version) =>
+    version == protocolVersionV1 || version == protocolVersionV2;
