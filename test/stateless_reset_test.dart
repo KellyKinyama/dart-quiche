@@ -139,4 +139,30 @@ void main() {
     expect(h.client.isStatelessReset, isFalse);
     expect(h.client.isDraining, isFalse);
   });
+
+  test('TP-declared stateless_reset_token binds the seq-0 peer CID '
+      '(no NEW_CONNECTION_ID needed)', () {
+    final h = _handshake();
+
+    // Token the server is "advertising" via its transport parameters.
+    // No NEW_CONNECTION_ID has been issued — the only peer CID the
+    // client knows about is seq 0.
+    final token = Uint8List(16);
+    for (var i = 0; i < 16; i++) {
+      token[i] = 0xB0 | i;
+    }
+    expect(h.client.peerConnectionIds.containsKey(1), isFalse,
+        reason: 'no NCID issued in this test');
+
+    h.client.applyPeerTransportParams(TransportParams(
+      statelessResetToken: token,
+    ));
+    expect(h.client.peerConnectionIds[0]!.resetToken, orderedEquals(token));
+
+    final reset = _statelessResetDatagram(token);
+    expect(() => h.client.recv(reset), throwsA(QuicError.done));
+
+    expect(h.client.isStatelessReset, isTrue);
+    expect(h.client.isDraining, isTrue);
+  });
 }

@@ -2064,6 +2064,23 @@ class Connection {
     _peerMaxIdleTimeout = tp.maxIdleTimeout;
     _peerActiveConnIdLimit = tp.activeConnIdLimit;
     _peerMaxDatagramFrameSize = tp.maxDatagramFrameSize;
+    // RFC 9000 §18.2 — the server's stateless_reset_token TP binds a
+    // reset token to the *initial* (seq-0) CID, so a server-initiated
+    // stateless reset that beats the first NEW_CONNECTION_ID still
+    // matches in [_matchesStatelessResetToken]. Without this seed the
+    // seq-0 entry keeps the all-zero placeholder set by [_seedCidPools]
+    // and the detector skips it.
+    final tpToken = tp.statelessResetToken;
+    if (tpToken != null && tpToken.length == 16 && !isServer) {
+      _seedCidPools();
+      final seq0 = _peerCids[0];
+      if (seq0 != null) {
+        _peerCids[0] = _PeerCid(
+          connId: seq0.connId,
+          resetToken: Uint8List.fromList(tpToken),
+        );
+      }
+    }
   }
 
   /// True if the connection has been torn down because an incoming
