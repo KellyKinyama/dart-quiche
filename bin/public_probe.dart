@@ -223,7 +223,10 @@ Future<int> main(List<String> args) async {
       try {
         conn.recvDatagram(d.data);
       } catch (e) {
-        print('[ERR]  recv during body threw: $e');
+        print(
+          '[ERR]  recv during body threw: $e '
+          '(${d.data.length}B: ${_hex(d.data, max: 48)})',
+        );
       }
     }
     while (true) {
