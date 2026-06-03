@@ -307,10 +307,17 @@ class TlsClientDriver {
   final BytesBuilder _handshakeAccum = BytesBuilder(copy: false);
   final BytesBuilder _applicationAccum = BytesBuilder(copy: false);
 
+  /// Optional resumption bundle. When provided, [start] stages a
+  /// ClientHello that carries the corresponding `pre_shared_key`
+  /// extension (and `early_data` if the ticket allows it) instead of
+  /// the vanilla full-handshake CH.
+  final ResumptionState? resumption;
+
   TlsClientDriver({
     required this.conn,
     required this.hostname,
     this.verifyHostname = true,
+    this.resumption,
     TlsClientHandshake? tls,
   }) : tls = tls ?? TlsClientHandshake(localCid: conn.localCid);
 
@@ -378,7 +385,10 @@ class TlsClientDriver {
   /// Stage the ClientHello on the Initial CRYPTO send stream. Idempotent.
   void start() {
     if (_started) return;
-    final ch = tls.buildClientHello(hostname: hostname);
+    final ch = tls.buildClientHello(
+      hostname: hostname,
+      resumption: resumption,
+    );
     _chBytes = ch;
     conn.spaces.crypto(Epoch.initial).cryptoStream.send.write(ch, false);
     _started = true;

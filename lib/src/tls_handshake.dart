@@ -19,10 +19,15 @@ import 'package:pure_dart_quic/cipher/cert_utils.dart' show EcdsaCert;
 import 'package:pure_dart_quic/constants.dart' show KeyPair;
 import 'package:pure_dart_quic/handshake/client_hello.dart';
 import 'package:pure_dart_quic/handshake/client_hello_builder.dart' as chb;
+import 'package:pure_dart_quic/handshake/psk_offer.dart' show PskOffer;
 import 'package:pure_dart_quic/handshake/server_hello.dart'
     show ServerHelloResult, buildServerHelloFromClientHello;
 import 'package:pure_dart_quic/handshake/tls_server_builder.dart'
     show ServerHandshakeArtifacts, alpnH3, buildServerHandshakeArtifacts;
+
+import 'crypto.dart' show Algorithm;
+import 'handshake_keys.dart' show HandshakeSecrets;
+import 'resumption.dart' show ResumptionState;
 
 export 'package:pure_dart_quic/cipher/cert_utils.dart' show EcdsaCert;
 export 'package:pure_dart_quic/cipher/x25519.dart' show x25519ShareSecret;
@@ -70,22 +75,80 @@ class TlsClientHandshake {
   /// Builds the initial ClientHello for [hostname] negotiating one of
   /// [alpns]. Returns the serialized TLS handshake message ready to be
   /// wrapped in a QUIC CRYPTO frame.
+  ///
+  /// When [resumption] is non-null the ClientHello carries a
+  /// `pre_shared_key` offer (RFC 8446 §4.2.11) for the bundled ticket,
+  /// with the binder HMAC computed via
+  /// [HandshakeSecrets.pskBinder]. If `resumption.ticket.supportsEarlyData`
+  /// is true the empty `early_data` extension (0x2a) is also emitted so
+  /// the server may accept 0-RTT data on this connection.
+  /// [now] defaults to `DateTime.now()` and is only consulted to compute
+  /// the obfuscated ticket age; tests inject a fixed value.
   Uint8List buildClientHello({
     required String hostname,
     List<String> alpns = const ['h3'],
+    ResumptionState? resumption,
+    DateTime? now,
   }) {
-    final ch = chb.buildInitialClientHello(
+    if (resumption == null) {
+      final ch = chb.buildInitialClientHello(
+        hostname: hostname,
+        x25519PublicKey: keyPair.publicKeyBytes,
+        localCid: localCid,
+        alpns: alpns,
+      );
+      clientHello = ch;
+      final bytes = ch.serialize();
+      clientHelloBytes = bytes;
+      return bytes;
+    }
+
+    final ticket = resumption.ticket;
+    final binderLen = _binderLenFor(resumption.alg);
+    final ageMs =
+        (now ?? DateTime.now()).difference(ticket.receivedAt).inMilliseconds;
+    final obfuscatedAge = (ageMs + ticket.ticketAgeAdd) & 0xFFFFFFFF;
+
+    final offer = PskOffer(
+      identity: ticket.ticket,
+      obfuscatedTicketAge: obfuscatedAge,
+      binderLen: binderLen,
+      offerEarlyData: ticket.supportsEarlyData,
+    );
+    final built = chb.buildClientHelloWithPsk(
       hostname: hostname,
       x25519PublicKey: keyPair.publicKeyBytes,
       localCid: localCid,
       alpns: alpns,
+      psk: offer,
     );
-    clientHello = ch;
-    final bytes = ch.serialize();
-    clientHelloBytes = bytes;
-    return bytes;
+
+    final psk = HandshakeSecrets.pskFromResumptionSecret(
+      resumption.alg,
+      resumption.resumptionMasterSecret,
+      ticket.ticketNonce,
+    );
+    final binder = HandshakeSecrets.pskBinder(
+      alg: resumption.alg,
+      psk: psk,
+      truncatedClientHello: built.truncatedForBinder!,
+    );
+    built.bytes.setRange(
+        built.binderOffset!, built.binderOffset! + binderLen, binder);
+
+    // clientHello (parsed object) is not used by downstream code when
+    // resumption is active; only the raw bytes flow into the CRYPTO
+    // stream + transcript hash.
+    clientHelloBytes = built.bytes;
+    return built.bytes;
   }
 }
+
+int _binderLenFor(Algorithm alg) => switch (alg) {
+  Algorithm.aes256Gcm => 48,
+  Algorithm.aes128Gcm => 32,
+  Algorithm.chacha20Poly1305 => 32,
+};
 
 /// Server-side TLS 1.3 handshake driver.
 class TlsServerHandshake {
