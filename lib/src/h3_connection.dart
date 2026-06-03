@@ -318,6 +318,116 @@ class H3Connection {
     _writeHeaders(streamId, trailers, fin: true);
   }
 
+  /// Open a new bidi request stream carrying an Extended CONNECT
+  /// request (RFC 9220, the HTTP/3 binding of RFC 8441). The
+  /// pseudo-header set is `:method = CONNECT`, `:scheme = https`,
+  /// `:authority`, `:path`, `:protocol = [protocol]`, followed by
+  /// any caller-supplied [extraHeaders]. The stream is left open
+  /// (fin = false) so the caller can subsequently call [sendData]
+  /// or [sendH3Datagram] against the returned id.
+  ///
+  /// Throws [StateError] if the peer has not advertised
+  /// SETTINGS_ENABLE_CONNECT_PROTOCOL=1.
+  int sendExtendedConnect({
+    required Uint8List authority,
+    required Uint8List path,
+    required Uint8List protocol,
+    List<H3Header> extraHeaders = const [],
+  }) {
+    if (!_peerEnableConnectProtocol) {
+      throw StateError(
+        'peer has not advertised SETTINGS_ENABLE_CONNECT_PROTOCOL=1',
+      );
+    }
+    final headers = <H3Header>[
+      H3Header(
+        Uint8List.fromList(const [
+          0x3a, 0x6d, 0x65, 0x74, 0x68, 0x6f, 0x64, // :method
+        ]),
+        Uint8List.fromList(const [0x43, 0x4f, 0x4e, 0x4e, 0x45, 0x43, 0x54]),
+      ),
+      H3Header(
+        Uint8List.fromList(const [
+          0x3a, 0x73, 0x63, 0x68, 0x65, 0x6d, 0x65, // :scheme
+        ]),
+        Uint8List.fromList(const [0x68, 0x74, 0x74, 0x70, 0x73]),
+      ),
+      H3Header(
+        Uint8List.fromList(const [
+          0x3a, 0x61, 0x75, 0x74, 0x68, 0x6f, 0x72, 0x69, 0x74, 0x79, //
+        ]),
+        authority,
+      ),
+      H3Header(
+        Uint8List.fromList(const [0x3a, 0x70, 0x61, 0x74, 0x68]),
+        path,
+      ),
+      H3Header(
+        Uint8List.fromList(const [
+          0x3a, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x63, 0x6f, 0x6c, //
+        ]),
+        protocol,
+      ),
+      ...extraHeaders,
+    ];
+    return sendRequest(headers, fin: false);
+  }
+
+  /// Inspect a [H3HeadersEvent] for the Extended CONNECT pseudo-header
+  /// set and, if all four required fields are present
+  /// (`:method = CONNECT`, `:scheme`, `:authority`, `:path`,
+  /// `:protocol`), return the `:protocol` value. Returns null
+  /// otherwise. The server side uses this to recognise an Extended
+  /// CONNECT request and dispatch to a protocol handler (e.g.
+  /// WebTransport when `:protocol == webtransport`).
+  static Uint8List? extendedConnectProtocol(H3HeadersEvent ev) {
+    bool isConnect = false;
+    bool hasScheme = false;
+    bool hasAuthority = false;
+    bool hasPath = false;
+    Uint8List? protocol;
+    for (final h in ev.headers) {
+      final name = h.name;
+      if (name.length == 7 &&
+          name[0] == 0x3a &&
+          name[1] == 0x6d && // m
+          name[2] == 0x65 && // e
+          name[3] == 0x74 && // t
+          name[4] == 0x68 && // h
+          name[5] == 0x6f && // o
+          name[6] == 0x64) {
+        // :method
+        final v = h.value;
+        isConnect = v.length == 7 &&
+            v[0] == 0x43 && v[1] == 0x4f && v[2] == 0x4e &&
+            v[3] == 0x4e && v[4] == 0x45 && v[5] == 0x43 && v[6] == 0x54;
+      } else if (name.length == 7 &&
+          name[0] == 0x3a &&
+          name[1] == 0x73) {
+        hasScheme = true; // :scheme
+      } else if (name.length == 10 &&
+          name[0] == 0x3a &&
+          name[1] == 0x61) {
+        hasAuthority = true; // :authority
+      } else if (name.length == 5 &&
+          name[0] == 0x3a &&
+          name[1] == 0x70 &&
+          name[2] == 0x61) {
+        hasPath = true; // :path
+      } else if (name.length == 9 &&
+          name[0] == 0x3a &&
+          name[1] == 0x70 &&
+          name[2] == 0x72) {
+        protocol = h.value; // :protocol
+      }
+    }
+    if (isConnect && hasScheme && hasAuthority && hasPath &&
+        protocol != null) {
+      return protocol;
+    }
+    return null;
+  }
+
   /// Send a GOAWAY frame on our control stream signalling the highest
   /// stream id we will process. RFC 9114 §5.2.
   void sendGoAway(int id) {
