@@ -10,8 +10,8 @@
 
 import 'dart:typed_data';
 
-import 'package:pure_dart_quic/buffer.dart' show QuicBuffer;
-import 'package:pure_dart_quic/handshake/server_hello.dart' show ServerHello;
+import 'package:dart_quiche/src/_pdq/buffer.dart' show QuicBuffer;
+import 'package:dart_quiche/src/_pdq/handshake/server_hello.dart' show ServerHello;
 
 import 'cert_utils.dart'
     show

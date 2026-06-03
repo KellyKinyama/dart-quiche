@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //
 // X.509 / ECDSA P-256 helpers. Thin adapter around
-// `package:pure_dart_quic/cipher/*` so the rest of dart_quiche depends only
+// `package:dart_quiche/src/_pdq/cipher/*` so the rest of dart_quiche depends only
 // on this file when it needs certificates or raw EC keys.
 
 import 'dart:typed_data';
 
 import 'package:pointycastle/export.dart' as pc;
-import 'package:pure_dart_quic/cipher/cert_utils.dart' as cu;
-import 'package:pure_dart_quic/cipher/ecdsa.dart' as ec;
+import 'package:dart_quiche/src/_pdq/cipher/cert_utils.dart' as cu;
+import 'package:dart_quiche/src/_pdq/cipher/ecdsa.dart' as ec;
 
-export 'package:pure_dart_quic/cipher/cert_utils.dart'
+export 'package:dart_quiche/src/_pdq/cipher/cert_utils.dart'
     show EcdsaCert, decodePemToDer, extractEcdsaPublicKeyFromCertificateDer;
 
 /// Generates a self-signed ECDSA P-256 certificate for testing.

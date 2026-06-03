@@ -15,35 +15,35 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:pure_dart_quic/cipher/cert_utils.dart' show EcdsaCert;
-import 'package:pure_dart_quic/constants.dart' show KeyPair;
-import 'package:pure_dart_quic/handshake/client_hello.dart';
-import 'package:pure_dart_quic/handshake/client_hello_builder.dart' as chb;
-import 'package:pure_dart_quic/handshake/psk_offer.dart' show PskOffer;
-import 'package:pure_dart_quic/handshake/server_hello.dart'
+import 'package:dart_quiche/src/_pdq/cipher/cert_utils.dart' show EcdsaCert;
+import 'package:dart_quiche/src/_pdq/constants.dart' show KeyPair;
+import 'package:dart_quiche/src/_pdq/handshake/client_hello.dart';
+import 'package:dart_quiche/src/_pdq/handshake/client_hello_builder.dart' as chb;
+import 'package:dart_quiche/src/_pdq/handshake/psk_offer.dart' show PskOffer;
+import 'package:dart_quiche/src/_pdq/handshake/server_hello.dart'
     show ServerHelloResult, buildServerHelloFromClientHello;
-import 'package:pure_dart_quic/handshake/tls_server_builder.dart'
+import 'package:dart_quiche/src/_pdq/handshake/tls_server_builder.dart'
     show ServerHandshakeArtifacts, alpnH3, buildServerHandshakeArtifacts;
 
 import 'crypto.dart' show Algorithm;
 import 'handshake_keys.dart' show HandshakeSecrets;
 import 'resumption.dart' show ResumptionState;
 
-export 'package:pure_dart_quic/cipher/cert_utils.dart' show EcdsaCert;
-export 'package:pure_dart_quic/cipher/x25519.dart' show x25519ShareSecret;
-export 'package:pure_dart_quic/constants.dart' show KeyPair;
-export 'package:pure_dart_quic/handshake/certificate.dart'
+export 'package:dart_quiche/src/_pdq/cipher/cert_utils.dart' show EcdsaCert;
+export 'package:dart_quiche/src/_pdq/cipher/x25519.dart' show x25519ShareSecret;
+export 'package:dart_quiche/src/_pdq/constants.dart' show KeyPair;
+export 'package:dart_quiche/src/_pdq/handshake/certificate.dart'
     show CertificateMessage, CertificateEntry, buildCertificateMessage;
-export 'package:pure_dart_quic/handshake/certificate_verify.dart'
+export 'package:dart_quiche/src/_pdq/handshake/certificate_verify.dart'
     show buildCertificateVerify;
-export 'package:pure_dart_quic/handshake/client_hello.dart' show ClientHello;
-export 'package:pure_dart_quic/handshake/encrypted_extensions.dart'
+export 'package:dart_quiche/src/_pdq/handshake/client_hello.dart' show ClientHello;
+export 'package:dart_quiche/src/_pdq/handshake/encrypted_extensions.dart'
     show EncryptedExtensions;
-export 'package:pure_dart_quic/handshake/finished.dart'
+export 'package:dart_quiche/src/_pdq/handshake/finished.dart'
     show FinishedMessage, buildFinishedMessage;
-export 'package:pure_dart_quic/handshake/server_hello.dart'
+export 'package:dart_quiche/src/_pdq/handshake/server_hello.dart'
     show ServerHelloResult;
-export 'package:pure_dart_quic/handshake/tls_server_builder.dart'
+export 'package:dart_quiche/src/_pdq/handshake/tls_server_builder.dart'
     show
         BuiltExtension,
         ServerHandshakeArtifacts,

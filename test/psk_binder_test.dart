@@ -12,8 +12,8 @@ import 'dart:typed_data';
 
 import 'package:dart_quiche/src/crypto.dart';
 import 'package:dart_quiche/src/handshake_keys.dart';
-import 'package:pure_dart_quic/handshake/client_hello_builder.dart';
-import 'package:pure_dart_quic/handshake/psk_offer.dart';
+import 'package:dart_quiche/src/_pdq/handshake/client_hello_builder.dart';
+import 'package:dart_quiche/src/_pdq/handshake/psk_offer.dart';
 import 'package:test/test.dart';
 
 void main() {
