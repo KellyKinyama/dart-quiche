@@ -140,6 +140,14 @@ class Connection {
   /// HANDSHAKE_DONE frame.
   bool _handshakeConfirmed = false;
 
+  /// Client-side: true while the application-epoch Seal currently
+  /// installed is the 0-RTT (early-data) Seal rather than the
+  /// post-handshake 1-RTT Seal. While set, `send(Epoch.application)`
+  /// emits long-header 0-RTT packets (RFC 9001 §4.6) instead of
+  /// short-header 1-RTT packets. The flag is cleared by
+  /// [retireZeroRttSend] once the caller installs 1-RTT keys.
+  bool _zeroRttSendActive = false;
+
   /// Client-side: true once we've adopted the server's chosen Source
   /// Connection ID from its first valid Initial as our peerCid
   /// (RFC 9000 §7.2). Subsequent long-header packets with a different
@@ -1158,7 +1166,7 @@ class Connection {
       return null;
     }
 
-    final pktType = _packetTypeFor(epoch);
+    final pktType = _packetTypeForSend(epoch);
     final pn = (space.largestTxPktNum ?? -1) + 1;
     const pnLen = 4;
 
@@ -1318,6 +1326,55 @@ class Connection {
         return PacketType.short;
     }
   }
+
+  /// Like [_packetTypeFor] but consults [_zeroRttSendActive] so that
+  /// while a client has installed 0-RTT keys but not yet rotated to
+  /// 1-RTT, application-epoch sends go out as long-header 0-RTT
+  /// packets (RFC 9001 §4.6).
+  PacketType _packetTypeForSend(Epoch e) {
+    if (e == Epoch.application && _zeroRttSendActive) {
+      return PacketType.zeroRTT;
+    }
+    return _packetTypeFor(e);
+  }
+
+  /// Install client-side 0-RTT (early-data) keys and switch
+  /// subsequent `send(Epoch.application)` calls to emit long-header
+  /// 0-RTT packets (RFC 9001 §4.6). Must be called before the
+  /// handshake completes; throws otherwise.
+  ///
+  /// Once the full handshake produces real 1-RTT application keys
+  /// the caller must install them via
+  /// `spaces.installApplicationKeys(...)` AND invoke
+  /// [retireZeroRttSend] so application-epoch packets revert to
+  /// short-header 1-RTT.
+  void enableZeroRttSend({
+    required Algorithm alg,
+    required Uint8List clientEarlyTrafficSecret,
+  }) {
+    if (isServer) {
+      throw StateError('0-RTT send is client-only');
+    }
+    if (_handshakeConfirmed) {
+      throw StateError('handshake already confirmed');
+    }
+    spaces.installEarlyDataKeys(
+      alg: alg,
+      clientEarlyTrafficSecret: clientEarlyTrafficSecret,
+      isServer: false,
+    );
+    _zeroRttSendActive = true;
+  }
+
+  /// Stop emitting 0-RTT packets. Invoked by the TLS driver once
+  /// real 1-RTT application keys have been installed.
+  void retireZeroRttSend() {
+    _zeroRttSendActive = false;
+  }
+
+  /// True while [enableZeroRttSend] has been called and
+  /// [retireZeroRttSend] has not yet rotated us out of 0-RTT.
+  bool get isZeroRttSendActive => _zeroRttSendActive;
 
   /// Maximum per-stream flow-control window for app streams.
   static const int _appStreamMaxData = 16 * 1024 * 1024;
@@ -1901,7 +1958,7 @@ class Connection {
           )
         : closeFrame;
 
-    final pktType = _packetTypeFor(epoch);
+    final pktType = _packetTypeForSend(epoch);
     final pn = (space.largestTxPktNum ?? -1) + 1;
     const pnLen = 4;
     final payloadLen = effective.wireLen();
