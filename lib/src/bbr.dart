@@ -29,6 +29,7 @@ enum BbrState {
   startup,
   drain,
   probeBw,
+  probeRtt,
 }
 
 /// Startup pacing/cwnd gain — 2/ln(2) ≈ 2.885, the high-gain factor
@@ -57,6 +58,26 @@ const int _bwWindowRounds = 10;
 
 /// Minimum cwnd in MSS-multiples (BBR §4.2.3.2 floor).
 const int _minCwndPackets = 4;
+
+/// ProbeRTT cwnd cap in MSS-multiples (RFC draft §4.4).
+const int _probeRttCwndPackets = 4;
+
+/// rtProp expiration window (RFC draft §4.4) — if min-RTT has not
+/// refreshed within this duration, enter ProbeRTT to flush bottleneck
+/// queues so the estimator can re-sample the true propagation delay.
+const Duration _probeRttInterval = Duration(seconds: 10);
+
+/// ProbeRTT dwell time at the reduced cwnd before exiting.
+const Duration _probeRttDuration = Duration(milliseconds: 200);
+
+/// BBRv2 per-round loss-rate threshold — above this we treat the
+/// path as queue-limited and shave cwnd (RFC draft-cardwell BBRv2
+/// §4.5.6, default 2%).
+const double _lossRateThreshold = 0.02;
+
+/// Multiplicative cwnd cut applied when the loss-rate threshold
+/// trips. Mirrors the BBRv2 `BBRBeta` constant (0.7).
+const double _lossBeta = 0.7;
 
 class _MaxBwFilter {
   // Newest first. Each entry is (bandwidth, roundSeen).
@@ -110,6 +131,25 @@ class Bbr2Ops extends CongestionControlOps {
   // ProbeBW gain-cycle index + last cycle-start time.
   int _cycleIdx = 0;
   DateTime? _cycleStart;
+
+  // ProbeRTT bookkeeping. _minRttStamp tracks when we last accepted
+  // a fresh min-RTT sample so we can fire ProbeRTT once it goes
+  // stale past _probeRttInterval. _probeRttDoneStamp is the wall
+  // time at which the cwnd cap may lift.
+  DateTime? _minRttStamp;
+  Duration? _minRttCached;
+  DateTime? _probeRttDoneStamp;
+  BbrState _stateBeforeProbeRtt = BbrState.probeBw;
+
+  // Per-round loss accounting for the BBRv2 loss-rate bound.
+  int _roundDeliveredAtRoundStart = 0;
+  int _roundLostBytes = 0;
+
+  // BBRv2 inflight upper bound. Null means unbounded; once the
+  // per-round loss rate exceeds _lossRateThreshold we clamp it to
+  // _lossBeta * bytesInFlight so subsequent BDP-target cwnd
+  // recomputes can't immediately re-grow past the bound.
+  int? _inflightHi;
 
   // Current pacing + cwnd gains (factor applied to BDP/cwnd_target).
   double _pacingGain = _startupGain;
@@ -165,6 +205,41 @@ class Bbr2Ops extends CongestionControlOps {
       _btlBw.update(sample, _round);
     }
 
+    // Track min-RTT freshness for the ProbeRTT trigger (RFC draft
+    // §4.4). We refresh _minRttStamp whenever rttStats reports a
+    // smaller value than we've cached.
+    final curMinRtt = rttStats.minRtt();
+    if (curMinRtt != null) {
+      if (_minRttCached == null || curMinRtt < _minRttCached!) {
+        _minRttCached = curMinRtt;
+        _minRttStamp = now;
+      }
+      _minRttStamp ??= now;
+    }
+
+    // BBRv2 loss-rate bound: tally per-round loss as a fraction of
+    // delivered bytes; if it exceeds the threshold, treat the path
+    // as queue-limited and clamp inflight_hi so subsequent cwnd
+    // recomputes can't grow back above _lossBeta * bytesInFlight.
+    if (newRound) {
+      final roundDelivered = _delivered - _roundDeliveredAtRoundStart;
+      if (roundDelivered > 0) {
+        final lossRate = _roundLostBytes / roundDelivered;
+        if (lossRate > _lossRateThreshold &&
+            state != BbrState.startup) {
+          final cap = math.max(
+            (bytesInFlight * _lossBeta).round(),
+            r.maxDatagramSize * _minCwndPackets,
+          );
+          _inflightHi = _inflightHi == null
+              ? cap
+              : math.min(_inflightHi!, cap);
+        }
+      }
+      _roundDeliveredAtRoundStart = _delivered;
+      _roundLostBytes = 0;
+    }
+
     // Startup-exit check (BBR §4.1.4). Once btlBw fails to grow by ≥
     // 25% over three consecutive rounds, declare the pipe full and
     // transition through Drain into ProbeBW.
@@ -207,11 +282,43 @@ class Bbr2Ops extends CongestionControlOps {
       }
     }
 
+    // ProbeRTT trigger / exit (RFC draft §4.4). Once min-RTT is
+    // older than _probeRttInterval and we're not already probing,
+    // pin cwnd to four packets for _probeRttDuration so the
+    // bottleneck queue can drain and a fresh propagation-delay
+    // sample is observable. Skip from Startup — we want at least
+    // one bandwidth plateau first.
+    if (state != BbrState.probeRtt &&
+        state != BbrState.startup &&
+        _minRttStamp != null &&
+        now.difference(_minRttStamp!) >= _probeRttInterval) {
+      _enterProbeRtt(now);
+    } else if (state == BbrState.probeRtt) {
+      final due = _probeRttDoneStamp;
+      if (due != null && !now.isBefore(due)) {
+        // Treat the just-finished ProbeRTT as a fresh min-RTT
+        // observation window so we don't immediately re-trigger.
+        _minRttStamp = now;
+        _enterProbeBw(now);
+      }
+    }
+
     // Recompute cwnd from current gain + BDP target. Floor at
-    // _minCwndPackets * MSS (BBR §4.2.3.2).
+    // _minCwndPackets * MSS (BBR §4.2.3.2). ProbeRTT clamps it to
+    // _probeRttCwndPackets * MSS regardless of the BDP target.
     final target = _inflight(rttStats, _cwndGain);
     final floor = r.maxDatagramSize * _minCwndPackets;
-    r.congestionWindow = math.max(target, floor);
+    var newCwnd = math.max(target, floor);
+    if (_inflightHi != null) {
+      newCwnd = math.min(newCwnd, _inflightHi!);
+    }
+    if (state == BbrState.probeRtt) {
+      newCwnd = math.min(
+        newCwnd,
+        r.maxDatagramSize * _probeRttCwndPackets,
+      );
+    }
+    r.congestionWindow = newCwnd;
 
     // sendQuantum mirrors cwnd so the pacer can drain at line rate.
     r.sendQuantum = math.max(r.sendQuantum, r.maxDatagramSize);
@@ -229,6 +336,16 @@ class Bbr2Ops extends CongestionControlOps {
     _cycleIdx = 0;
     _pacingGain = _probeBwGainCycle[0];
     _cwndGain = 2.0;
+  }
+
+  void _enterProbeRtt(DateTime now) {
+    _stateBeforeProbeRtt = state;
+    state = BbrState.probeRtt;
+    // Pacing keeps the unit gain while we drain; cwnd is clamped by
+    // the caller using _probeRttCwndPackets.
+    _pacingGain = 1.0;
+    _cwndGain = 1.0;
+    _probeRttDoneStamp = now.add(_probeRttDuration);
   }
 
   /// BDP × gain, in bytes. Falls back to the initial cwnd while
@@ -252,9 +369,9 @@ class Bbr2Ops extends CongestionControlOps {
     Sent largestLostPkt,
     DateTime now,
   ) {
-    // BBRv1 does not reduce cwnd on loss — bandwidth probing handles
-    // that implicitly through the delivery-rate estimator. The v2
-    // install will add the loss-rate bound here.
+    // Per-round loss tally feeds the BBRv2 loss-rate bound, which is
+    // checked at the next round boundary inside onPacketsAcked.
+    _roundLostBytes += lostBytes;
     if (r.inCongestionRecovery(largestLostPkt.timeSent)) return;
     r.congestionRecoveryStartTime = now;
   }
@@ -275,6 +392,8 @@ class Bbr2Ops extends CongestionControlOps {
         return 'bbr_drain';
       case BbrState.probeBw:
         return 'bbr_probe_bw';
+      case BbrState.probeRtt:
+        return 'bbr_probe_rtt';
     }
   }
 }
