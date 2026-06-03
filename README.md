@@ -6,7 +6,7 @@ loss recovery, congestion control, flow control, HTTP/3 framing, QPACK
 and WebTransport are all implemented in Dart on top of
 [pointycastle](https://pub.dev/packages/pointycastle).
 
-**HEAD:** `21d30ec` (main) · **Tests:** 485/485 unit · **Interop:** 9/9
+**HEAD:** `cb60fce` (main) · **Tests:** 486/486 unit · **Interop:** 9/9
 public-Internet HTTP/3 servers reachable.
 
 See [docs/QUICHE_COMPARISON.md](docs/QUICHE_COMPARISON.md) for the
@@ -64,8 +64,8 @@ Tooling:
   is green; investigation ongoing).
 - Active connection-migration socket rebind (state machine ready;
   rebind is an app-layer concern).
-- P-256 / P-384 ECDHE, ECN counters in ACK, Stateless Reset detector
-  wiring — see the comparison doc for the full 🟡 / ❌ list.
+- P-256 / P-384 ECDHE and ECN counters in ACK — see the comparison
+  doc for the full 🟡 / ❌ list.
 
 ## Layout
 
@@ -81,7 +81,7 @@ bin/h3_server.dart          Minimal HTTP/3 server
 bin/public_probe.dart       Live-Internet H3 GET probe
 bin/public_probe_0rtt.dart  Two-connection 0-RTT harvest + replay
 bin/interop_*.dart          Interop smoke harnesses
-test/                       485 unit tests
+test/                       486 unit tests
 docs/QUICHE_COMPARISON.md   Feature parity vs Rust quiche
 docs/INTEROP.md             Live-server interop matrix
 ```

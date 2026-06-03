@@ -87,7 +87,7 @@ draft-ietf-webtrans-http3 §5 with a partial-buffer reassembler;
 and per-session unidirectional (`0x54`) + bidirectional
 (WEBTRANSPORT_STREAM `0x41`) streams allocated past the H3
 demux probe range so they round-trip through raw QUIC stream
-IO). Current count: **485**.
+IO). Current count: **486**.
 
 ## Remaining gaps
 
@@ -133,6 +133,21 @@ Ordered by impact:
    an app-layer concern and not exercised by the probe.
 
 ## Recently closed
+
+- **Stateless-reset seq-0 binding from peer transport parameter
+  (RFC 9000 §18.2).** `Connection.applyPeerTransportParams`
+  (`cb60fce`) now copies `tp.statelessResetToken` into
+  `_peerCids[0].resetToken` on the client side. The detector at
+  `recv()` was already wired both pre-decrypt and after AEAD failure,
+  but `_matchesStatelessResetToken` deliberately skips the all-zero
+  placeholder set by `_seedCidPools`, so a server-initiated reset
+  that beat the first `NEW_CONNECTION_ID` would slip past. Seeding
+  the slot from the TP closes the gap; gated `!isServer` per
+  RFC 9000 §18.2 (only servers send the parameter). Covered by a
+  new third case in `stateless_reset_test` that injects the TP
+  directly (no NCID issued), asserts the seq-0 binding, and verifies
+  `isStatelessReset` + `isDraining` flip when a matching tail-token
+  datagram arrives.
 
 - **`NEW_TOKEN` round-trip (RFC 9000 §8.1.3).** `Connection`
   (`490ce86`) takes an optional `tokenIssuer: Uint8List Function()?`

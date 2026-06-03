@@ -2,7 +2,7 @@
 
 Snapshot date: 2026-06-03.
 Rust `quiche` reference HEAD: `0ddcd658` (master).
-dart-quiche HEAD: `490ce86` (main), 485/485 unit tests passing, 9/9
+dart-quiche HEAD: `cb60fce` (main), 486/486 unit tests passing, 9/9
 public-Internet HTTP/3 servers reachable (see [INTEROP.md](INTEROP.md)).
 
 This is a working comparison kept beside the interop matrix. It is
@@ -18,7 +18,7 @@ means partial / not wired into the public surface; ❌ means absent.
 | QUIC v2 (`0x6b3343cf`, RFC 9369) | ✅ | ✅ (`d65b0e1`) |
 | Version Negotiation (parse + emit) | ✅ | ✅ |
 | Retry packet (build + verify integrity tag) | ✅ | ✅ (v1 + v2) |
-| Stateless Reset | ✅ | 🟡 token plumbed, detector not wired |
+| Stateless Reset | ✅ | ✅ detector wired pre-decrypt + post-AEAD-fail; seq-0 binding seeded from peer TP `stateless_reset_token` (`cb60fce`) |
 | Coalesced datagrams (Initial+Handshake+1-RTT) | ✅ | ✅ |
 | Variable-length packet numbers | ✅ | ✅ |
 | GREASE bits / GREASE versions | ✅ | ✅ |
