@@ -329,6 +329,55 @@ class HandshakeSecrets {
       context: ticketNonce,
     );
   }
+
+  /// `binder_key = HKDF-Expand-Label(early_secret, "res binder", H(""),
+  /// HashLen)` (RFC 8446 §7.1). The base key from which a
+  /// pre_shared_key extension's binder HMAC is derived for a *resumed*
+  /// PSK. (The "ext binder" variant for externally-provisioned PSKs is
+  /// not implemented; QUIC resumption only uses the resumption PSK
+  /// branch.)
+  static Uint8List resumptionBinderKey(Algorithm alg, Uint8List earlySecret) {
+    return hkdfExpandLabel(
+      alg,
+      earlySecret,
+      _bytes('res binder'),
+      _hashLenFor(alg),
+      context: _emptyHashFor(alg),
+    );
+  }
+
+  /// Computes the PSK binder for a single pre_shared_key offer
+  /// (RFC 8446 §4.2.11.2).
+  ///
+  /// `binder = HMAC(finished_key, transcript_hash(truncated_ClientHello))`
+  /// where `finished_key = HKDF-Expand-Label(binder_key, "finished",
+  /// "", HashLen)` and `truncated_ClientHello` is the on-the-wire
+  /// ClientHello bytes up to *but not including* the `binders` field of
+  /// the pre_shared_key extension (the `identities` length prefix and
+  /// identity list ARE included; only the binder list — including its
+  /// 2-byte length prefix — is excluded).
+  ///
+  /// The caller is responsible for assembling `truncatedClientHello`
+  /// at exactly the right byte offset; pure-dart-quic's ClientHello
+  /// builder exposes this via the eventual `BuiltClientHello.binderOffset`.
+  static Uint8List pskBinder({
+    required Algorithm alg,
+    required Uint8List psk,
+    required Uint8List truncatedClientHello,
+  }) {
+    final earlySecret = earlySecretFromPsk(alg, psk);
+    final binderKey = resumptionBinderKey(alg, earlySecret);
+    final transcript = transcriptHash(truncatedClientHello, alg: alg);
+    final finishedKey = hkdfExpandLabel(
+      alg,
+      binderKey,
+      _bytes('finished'),
+      _hashLenFor(alg),
+    );
+    final hmac = pc.HMac(_digestFor(alg), _hmacBlockFor(alg))
+      ..init(pc.KeyParameter(finishedKey));
+    return hmac.process(transcript);
+  }
 }
 
 /// Installs derived TLS-1.3 packet protection keys into the per-epoch
