@@ -76,8 +76,18 @@ shape mirrors cloudflare/quiche's qlog crate so traces feed
 directly into qvis), and a BBRv2 congestion controller (Startup
 / Drain / ProbeBW gain-cycle, ProbeRTT phase with 4 * MSS cwnd
 clamp on 10s stale-rtprop trigger, and a per-round 2%
-loss-rate inflight_hi cap with BBRBeta=0.7). Current count:
-**435**.
+loss-rate inflight_hi cap with BBRBeta=0.7), and the full
+WebTransport-over-HTTP/3 surface (RFC 9297 H3 Datagrams routed
+via per-session Quarter-Stream-ID; RFC 9220 Extended CONNECT
+with `:protocol = webtransport` advertised via
+`SETTINGS_ENABLE_CONNECT_PROTOCOL`; a `WebTransportSession`
+wrapper offering connect / accept / reject / datagram /
+close; the CLOSE_WEBTRANSPORT_SESSION + DRAIN capsule wire from
+draft-ietf-webtrans-http3 §5 with a partial-buffer reassembler;
+and per-session unidirectional (`0x54`) + bidirectional
+(WEBTRANSPORT_STREAM `0x41`) streams allocated past the H3
+demux probe range so they round-trip through raw QUIC stream
+IO). Current count: **458**.
 
 ## Remaining gaps
 
@@ -115,6 +125,49 @@ Ordered by impact:
    an app-layer concern and not exercised by the probe.
 
 ## Recently closed
+
+- **WebTransport over HTTP/3 (draft-ietf-webtrans-http3).** Six
+  installs landed end-to-end on top of the existing H3 stack:
+  install 1 (`8f8f5f5`) advertises `SETTINGS_H3_DATAGRAM=1`
+  (RFC 9297) + `SETTINGS_ENABLE_CONNECT_PROTOCOL=1` (RFC 9220)
+  and wires `H3Connection.sendH3Datagram` /
+  `recvH3Datagram` (varint quarter-stream-id over the QUIC
+  DATAGRAM frame); install 2 (`47d22a9`) adds the request-side
+  ergonomics — `H3Connection.sendExtendedConnect({authority,
+  path, protocol, extraHeaders})` plus a static
+  `extendedConnectProtocol` recogniser that returns the
+  `:protocol` value when the four-pseudo-header CONNECT set is
+  present; install 3 (`3674070`) ships
+  `WebTransportSession.connect` /
+  `.acceptIfWebTransport` / `.accept` / `.reject` /
+  `.sendDatagram` / `.recvDatagram` / `.close` so applications
+  speak WT without re-implementing the request/response +
+  datagram-quartering plumbing; install 4 (`8ce2ebe`) wires the
+  session-control capsule protocol from
+  draft-ietf-webtrans-http3 §5 —
+  `encodeCloseSessionCapsule(errorCode, reason)` (capsule type
+  `0x2843`), `encodeDrainSessionCapsule` (`0x78ae`), a
+  `parseCapsule` peeler, `WebTransportSession.closeSession()` /
+  `.drain()`, and a `feedCapsuleData` reassembler that handles
+  capsules straddling H3 DATA-frame boundaries per RFC 9297
+  §3.2; install 5 (`caf86e9`) adds per-session unidirectional
+  streams — `H3Connection.allocLocalUniStreamId()` (skips past
+  the three H3 control streams and outside the demux probe
+  range), the `varint(0x54) || varint(sessionId)` prefix
+  encode/parse, `WebTransportSession.openUniStream()` /
+  `sendUniStreamData`, and a stateful `WtUniStreamReader` that
+  buffers the prefix across feeds; install 6 (`528e9fd`) is the
+  bidi sibling — `WEBTRANSPORT_STREAM` frame prefix
+  (`varint(0x41) || varint(sessionId)`),
+  `allocLocalWtBidiStreamId` (initialised at `bidiBase + 16` so
+  WT bidis don't collide with H3 request streams),
+  `openBidiStream` / `sendBidiStreamData`, and
+  `WtBidiStreamReader`. End-to-end tests:
+  `h3_datagram_test`, `h3_extended_connect_test`,
+  `webtransport_session_test`, `webtransport_capsule_test`,
+  `webtransport_uni_stream_test`, `webtransport_bidi_stream_test`
+  — all green over the real TLS + SETTINGS + Extended CONNECT
+  handshake.
 
 - **BBRv2 congestion controller**. New `lib/src/bbr.dart` replaces
   the prior `UnimplementedError` stub behind

@@ -2,7 +2,7 @@
 
 Snapshot date: 2026-06-03.
 Rust `quiche` reference HEAD: `0ddcd658` (master).
-dart-quiche HEAD: `07eebfd` (main), 396/396 unit tests passing, 9/9
+dart-quiche HEAD: `528e9fd` (main), 458/458 unit tests passing, 9/9
 public-Internet HTTP/3 servers reachable (see [INTEROP.md](INTEROP.md)).
 
 This is a working comparison kept beside the interop matrix. It is
@@ -68,8 +68,9 @@ means partial / not wired into the public surface; ❌ means absent.
 | QPACK static table | ✅ | ✅ |
 | QPACK dynamic table | ✅ insert + evict | 🟡 decoder reads, encoder static-only |
 | QPACK Huffman | ✅ | ✅ |
-| Extended CONNECT (RFC 9220 / WebTransport) | ✅ | ❌ |
-| h3 DATAGRAM (RFC 9297) | ✅ | 🟡 transport DATAGRAM ok; h3 framing not wrapped |
+| Extended CONNECT (RFC 9220 / WebTransport) | ✅ | ✅ `sendExtendedConnect` + `extendedConnectProtocol` recogniser (`47d22a9`) |
+| h3 DATAGRAM (RFC 9297) | ✅ | ✅ `sendH3Datagram` / `recvH3Datagram` w/ quarter-stream-id (`8f8f5f5`) |
+| WebTransport sessions (draft-ietf-webtrans-http3) | ✅ | ✅ `WebTransportSession` connect/accept/datagram/close + CLOSE/DRAIN capsules + uni (`0x54`) + bidi (`0x41`) streams (`3674070`/`8ce2ebe`/`caf86e9`/`528e9fd`) |
 
 ## Operational
 
@@ -94,7 +95,9 @@ full matrix, ciphers, body sizes, and reproduction commands.
 1. **PKI chain validation.** Today: leaf SAN + signature only. Next:
    Win32 `CertGetCertificateChain` FFI or a Dart-native chain walker
    against a bundled trust store.
-2. **Extended CONNECT / WebTransport + h3 DATAGRAM framing.**
-3. **Public-Internet 0-RTT probe.** Pipeline is green in-process;
+2. **Public-Internet 0-RTT probe.** Pipeline is green in-process;
    need a probe variant that harvests a real NewSessionTicket on
    one connection and replays it against the same origin.
+3. **QPACK encoder dynamic-table inserts.** Decoder already honours
+   peer inserts; the encoder is still static-table only.
+4. **DPLPMTUD + a real pacing slot on the hot send path.**
