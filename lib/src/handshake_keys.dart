@@ -109,6 +109,12 @@ class HandshakeSecrets {
   final Uint8List cApplicationTraffic;
   final Uint8List sApplicationTraffic;
 
+  /// `resumption_master_secret = HKDF-Expand-Label(master_secret,
+  /// "res master", H(CH..client Finished), HashLen)` (RFC 8446 §7.1).
+  /// Populated only when [HandshakeSecrets.derive] is called with
+  /// [transcriptHashAfterClientFinished]; null otherwise.
+  final Uint8List? resumptionMasterSecret;
+
   const HandshakeSecrets._({
     required this.alg,
     required this.earlySecret,
@@ -118,6 +124,7 @@ class HandshakeSecrets {
     required this.sHandshakeTraffic,
     required this.cApplicationTraffic,
     required this.sApplicationTraffic,
+    this.resumptionMasterSecret,
   });
 
   /// Runs the full TLS 1.3 key schedule.
@@ -135,14 +142,20 @@ class HandshakeSecrets {
     required Uint8List sharedSecret,
     required Uint8List transcriptHashAfterServerHello,
     required Uint8List transcriptHashAfterServerFinished,
+    Uint8List? transcriptHashAfterClientFinished,
+    Uint8List? psk,
     Algorithm alg = Algorithm.aes128Gcm,
   }) {
     final hashLen = _hashLenFor(alg);
     final emptyHash = _emptyHashFor(alg);
     final zeros = Uint8List(hashLen);
 
-    // early_secret = HKDF-Extract(salt=0, IKM=0^HashLen)
-    final earlySecret = hkdfExtract(alg, zeros, Uint8List(hashLen));
+    // early_secret = HKDF-Extract(salt=0, IKM=PSK or 0^HashLen)
+    final earlySecret = hkdfExtract(
+      alg,
+      psk ?? Uint8List(hashLen),
+      zeros,
+    );
 
     // derived = HKDF-Expand-Label(early_secret, "derived", H(""), HashLen)
     final derived1 = hkdfExpandLabel(
@@ -198,6 +211,16 @@ class HandshakeSecrets {
       context: transcriptHashAfterServerFinished,
     );
 
+    final resMaster = transcriptHashAfterClientFinished == null
+        ? null
+        : hkdfExpandLabel(
+            alg,
+            masterSecret,
+            _bytes('res master'),
+            hashLen,
+            context: transcriptHashAfterClientFinished,
+          );
+
     return HandshakeSecrets._(
       alg: alg,
       earlySecret: earlySecret,
@@ -207,6 +230,7 @@ class HandshakeSecrets {
       sHandshakeTraffic: sHs,
       cApplicationTraffic: cAp,
       sApplicationTraffic: sAp,
+      resumptionMasterSecret: resMaster,
     );
   }
 
@@ -265,6 +289,46 @@ class HandshakeSecrets {
     Uint8List data, {
     Algorithm alg = Algorithm.aes128Gcm,
   }) => _isSha384(alg) ? _sha384(data) : _sha256(data);
+
+  /// `early_secret = HKDF-Extract(salt=0, IKM=PSK)` (RFC 8446 §7.1).
+  /// Used by 0-RTT senders before the full handshake runs.
+  static Uint8List earlySecretFromPsk(Algorithm alg, Uint8List psk) {
+    final hashLen = _hashLenFor(alg);
+    return hkdfExtract(alg, psk, Uint8List(hashLen));
+  }
+
+  /// `client_early_traffic_secret = HKDF-Expand-Label(early_secret,
+  /// "c e traffic", H(ClientHello), HashLen)` (RFC 8446 §7.1).
+  static Uint8List clientEarlyTrafficSecret(
+    Algorithm alg,
+    Uint8List earlySecret,
+    Uint8List transcriptHashAfterClientHello,
+  ) {
+    return hkdfExpandLabel(
+      alg,
+      earlySecret,
+      _bytes('c e traffic'),
+      _hashLenFor(alg),
+      context: transcriptHashAfterClientHello,
+    );
+  }
+
+  /// `PSK = HKDF-Expand-Label(resumption_master_secret, "resumption",
+  /// ticket_nonce, HashLen)` (RFC 8446 §4.6.1). Recovers the PSK for a
+  /// previously-issued NewSessionTicket given its `ticket_nonce`.
+  static Uint8List pskFromResumptionSecret(
+    Algorithm alg,
+    Uint8List resumptionMasterSecret,
+    Uint8List ticketNonce,
+  ) {
+    return hkdfExpandLabel(
+      alg,
+      resumptionMasterSecret,
+      _bytes('resumption'),
+      _hashLenFor(alg),
+      context: ticketNonce,
+    );
+  }
 }
 
 /// Installs derived TLS-1.3 packet protection keys into the per-epoch
@@ -311,5 +375,26 @@ extension HandshakeKeysInstall on PktNumSpaceMap {
     final ctx = crypto(Epoch.application);
     ctx.cryptoOpen = open;
     ctx.cryptoSeal = seal;
+  }
+
+  /// Installs 0-RTT (early-data) keys for the application epoch.
+  ///
+  /// 0-RTT shares the application epoch's [PktNumSpace] but uses keys
+  /// derived from [clientEarlyTrafficSecret] instead of the post-handshake
+  /// `c_ap_traffic` / `s_ap_traffic`. On the client this installs a
+  /// [Seal] (the client encrypts 0-RTT packets); on the server it installs
+  /// an [Open]. After the full handshake completes the application keys
+  /// must be re-installed via [installApplicationKeys].
+  void installEarlyDataKeys({
+    required Algorithm alg,
+    required Uint8List clientEarlyTrafficSecret,
+    required bool isServer,
+  }) {
+    final ctx = crypto(Epoch.application);
+    if (isServer) {
+      ctx.cryptoOpen = Open.fromSecret(alg, clientEarlyTrafficSecret);
+    } else {
+      ctx.cryptoSeal = Seal.fromSecret(alg, clientEarlyTrafficSecret);
+    }
   }
 }
