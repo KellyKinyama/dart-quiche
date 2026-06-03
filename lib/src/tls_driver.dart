@@ -24,6 +24,7 @@ import 'connection.dart';
 import 'crypto.dart' show Algorithm;
 import 'handshake_keys.dart';
 import 'packet_type.dart';
+import 'resumption.dart' show ResumptionState, SessionTicket;
 import 'tls_handshake.dart';
 import 'transport_params.dart';
 
@@ -286,6 +287,15 @@ class TlsClientDriver {
   bool _completedHandshake = false;
   HandshakeSecrets? secrets;
 
+  /// Tickets parsed from server NewSessionTicket messages received on
+  /// the application-epoch CRYPTO stream after the handshake.
+  final List<SessionTicket> _receivedTickets = [];
+
+  /// Snapshot of the most-recently received peer transport parameters,
+  /// as the raw TLS extension blob. Replayed at 0-RTT attempt time per
+  /// RFC 9001 §7.4. Populated alongside [secrets] when EE is parsed.
+  Uint8List? _peerTransportParamsBlob;
+
   // Per-epoch CRYPTO reassembly buffers. The wire connection's
   // `RecvBuf` already gives us in-order bytes, but it does not know
   // about TLS-message framing — a single server flight (EE || Cert
@@ -295,6 +305,7 @@ class TlsClientDriver {
   // at least one complete TLS handshake message.
   final BytesBuilder _initialAccum = BytesBuilder(copy: false);
   final BytesBuilder _handshakeAccum = BytesBuilder(copy: false);
+  final BytesBuilder _applicationAccum = BytesBuilder(copy: false);
 
   TlsClientDriver({
     required this.conn,
@@ -323,6 +334,46 @@ class TlsClientDriver {
   /// The exact ServerHello bytes this driver consumed from the Initial
   /// CRYPTO recv stream.
   Uint8List? get serverHelloBytes => _shBytes;
+
+  /// TLS 1.3 NewSessionTickets the server has issued on this connection,
+  /// in arrival order. Each ticket can be bundled with
+  /// [HandshakeSecrets.resumptionMasterSecret] to build a
+  /// [ResumptionState] for 0-RTT on a future connection.
+  List<SessionTicket> get receivedTickets => List.unmodifiable(_receivedTickets);
+
+  /// Most recent peer-transport-params extension blob, captured at EE
+  /// parse time. Stash this in [ResumptionState.remoteTransportParams]
+  /// so a future 0-RTT attempt can honour the values the server
+  /// previously advertised (RFC 9001 §7.4).
+  Uint8List? get peerTransportParamsBlob => _peerTransportParamsBlob;
+
+  /// Bundle the first received NewSessionTicket into a
+  /// [ResumptionState] suitable for persisting and replaying on a
+  /// future connection to the same `(host, port, alpn)`. Returns null
+  /// if the handshake has not completed, no tickets have been
+  /// received yet, or [secrets] does not carry a
+  /// resumption_master_secret (e.g. derive() was called without the
+  /// post-client-Finished transcript).
+  ResumptionState? takeResumptionState({
+    required String host,
+    required int port,
+    required String alpn,
+  }) {
+    if (!_completedHandshake) return null;
+    if (_receivedTickets.isEmpty) return null;
+    final rms = secrets?.resumptionMasterSecret;
+    if (rms == null) return null;
+    return ResumptionState(
+      host: host,
+      port: port,
+      alpn: alpn,
+      alg: _negotiatedAlg ?? Algorithm.aes128Gcm,
+      ticket: _receivedTickets.first,
+      resumptionMasterSecret: rms,
+      remoteTransportParams:
+          _peerTransportParamsBlob ?? Uint8List(0),
+    );
+  }
 
   /// Stage the ClientHello on the Initial CRYPTO send stream. Idempotent.
   void start() {
@@ -452,6 +503,7 @@ class TlsClientDriver {
           // in the flight).
           final peerTpRaw = _extractPeerTpFromEncryptedExtensions(flightBytes);
           if (peerTpRaw != null) {
+            _peerTransportParamsBlob = Uint8List.fromList(peerTpRaw);
             final peerTp = TransportParams.decode(peerTpRaw, false);
             conn.applyPeerTransportParams(peerTp);
           }
@@ -512,10 +564,72 @@ class TlsClientDriver {
               .cryptoStream
               .send
               .write(finishedBytes, false);
+
+          // RFC 8446 §7.1: derive resumption_master_secret from the
+          // transcript hash that ALSO includes the client Finished.
+          // We need this to mint a SessionTicket-backed ResumptionState
+          // once the server sends NewSessionTicket on the application
+          // epoch.
+          final transcriptAfterClientFinished =
+              HandshakeSecrets.transcriptHash(
+            Uint8List.fromList([
+              ..._chBytes!,
+              ..._shBytes!,
+              ...flightBytes,
+              ...finishedBytes,
+            ]),
+            alg: _negotiatedAlg!,
+          );
+          secrets = HandshakeSecrets.derive(
+            sharedSecret: _sharedSecret!,
+            transcriptHashAfterServerHello: transcriptAfterShOnly,
+            transcriptHashAfterServerFinished: transcriptAfterServerFinished,
+            transcriptHashAfterClientFinished: transcriptAfterClientFinished,
+            alg: _negotiatedAlg!,
+          );
+
           _processedHandshakeFlight = true;
           conn.spaces.dropEpochState(Epoch.initial);
           _completedHandshake = true;
           advanced = true;
+        }
+      }
+    }
+
+    // Post-handshake: drain any application-epoch CRYPTO stream bytes
+    // (currently only TLS 1.3 NewSessionTicket = 0x04 is recognised).
+    // Unknown handshake types are skipped, not errored, so a future
+    // KeyUpdate (0x18) or post-handshake auth wouldn't break us.
+    if (_completedHandshake) {
+      _drainRecvInto(Epoch.application, _applicationAccum);
+      if (_applicationAccum.isNotEmpty) {
+        final buf = _applicationAccum.toBytes();
+        var off = 0;
+        while (off + 4 <= buf.length) {
+          final type = buf[off];
+          final len = (buf[off + 1] << 16) |
+              (buf[off + 2] << 8) |
+              buf[off + 3];
+          if (off + 4 + len > buf.length) break;
+          final bodyEnd = off + 4 + len;
+          if (type == 0x04) {
+            try {
+              _receivedTickets.add(SessionTicket.parse(
+                Uint8List.sublistView(buf, off + 4, bodyEnd),
+              ));
+              advanced = true;
+            } on FormatException {
+              // Malformed ticket: skip but keep parsing — the peer's
+              // CRYPTO stream is otherwise valid.
+            }
+          }
+          off = bodyEnd;
+        }
+        // Re-seed the accumulator with any tail bytes that weren't a
+        // complete message yet.
+        _applicationAccum.clear();
+        if (off < buf.length) {
+          _applicationAccum.add(Uint8List.sublistView(buf, off));
         }
       }
     }
