@@ -12,6 +12,7 @@
 
 import 'acked.dart';
 import 'bandwidth.dart';
+import 'bbr.dart';
 import 'cubic.dart';
 import 'delivery_rate.dart';
 import 'hystart.dart';
@@ -174,6 +175,6 @@ CongestionControlOps _opsFor(CongestionControlAlgorithm algo) {
     case CongestionControlAlgorithm.cubic:
       return CubicOps();
     case CongestionControlAlgorithm.bbr2Gcongestion:
-      throw UnimplementedError('BBRv2 not yet ported');
+      return Bbr2Ops();
   }
 }
