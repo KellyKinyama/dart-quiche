@@ -693,6 +693,20 @@ class Connection {
     // Successful decrypt resets the idle timer (RFC 9000 §10.1.2).
     _lastActivity = DateTime.now();
 
+    if (qlog != null) {
+      qlog!.emit(
+        'quic:packet_received',
+        packetSentData(
+          packetType: _qlogPacketType(hdr.ty),
+          packetNumber: fullPn,
+          dcid: hdr.dcid.bytes,
+          scid: hdr.scid.bytes,
+          length: buf.length,
+          version: isLong ? hdr.version : null,
+        ),
+      );
+    }
+
     // RFC 9000 §8.1 — a server considers the peer address validated
     // as soon as it receives a packet protected with Handshake keys.
     // (Initial keys are derivable by anyone; Handshake keys are not.)
