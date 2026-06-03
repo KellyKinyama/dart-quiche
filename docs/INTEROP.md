@@ -57,11 +57,12 @@ Verified previously (see git log around `082b1f8` and earlier):
 dart test
 ```
 
-389 tests across the connection state machine, packet codec, frame
+396 tests across the connection state machine, packet codec, frame
 codec, QPACK, h3, TLS key schedule (all three QUIC v1 cipher suites:
 `TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`,
-`TLS_CHACHA20_POLY1305_SHA256`), Retry / VN helpers, and the RFC 9000
-§8.1 server-side anti-amplification limit.
+`TLS_CHACHA20_POLY1305_SHA256`), Retry / VN helpers, the RFC 9000
+§8.1 server-side anti-amplification limit, and QUIC v2 (RFC 9369)
+version dispatch + v2 Retry integrity.
 
 ## Remaining gaps
 
@@ -86,14 +87,11 @@ Ordered by impact:
    parameters + traffic secret + ALPN at session-close and replaying
    them on the next Initial.
 
-4. **Connection migration / path validation.** `PATH_CHALLENGE` /
-   `PATH_RESPONSE` frames parse but the active-path swap logic is not
-   wired.
-
-5. **QUIC v2 (RFC 9369).** Only QUIC v1 (`0x00000001`) is supported.
-   v2 would need `protocolVersionV2 = 0x6b3343cf`, a v2 Initial salt,
-   v2-specific HKDF labels (`quicv2 key/iv/hp`) and a v2 Retry
-   integrity key + nonce.
+4. **Connection migration — active socket swap.** `PATH_CHALLENGE` /
+   `PATH_RESPONSE` are wired in the connection state machine
+   (challenge echo, response clears outstanding, `_pathValidated`
+   flips), but rebinding the UDP socket on a new local 4-tuple is
+   an app-layer concern and not exercised by the probe.
 
 ## Recently closed
 
@@ -109,3 +107,7 @@ Ordered by impact:
   plumbing in `HandshakeSecrets`, accepted by `tls_driver`, offered
   by pure-dart-quic's ClientHello. Commits `da6fff9` + pure-dart-quic
   `b65a3b3`.
+- **QUIC v2 (RFC 9369).** `protocolVersionV2 = 0x6b3343cf`, v2 Initial
+  salt, v2 HKDF labels (`quicv2 key/iv/hp/ku`), v2 long-header type-bit
+  rotation, and v2 Retry integrity key + nonce all wired end-to-end
+  through `crypto.dart` and `packet.dart`. Commit `d65b0e1`.
