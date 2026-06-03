@@ -1266,6 +1266,16 @@ class Connection {
     space.ackElicited = false;
 
     if (qlog != null) {
+      final qframes = <Map<String, Object?>>[
+        if (ackFrame != null) qlogFrame(ackFrame),
+        if (cryptoFrame != null) qlogFrame(cryptoFrame),
+        if (hdFrame != null) qlogFrame(hdFrame),
+        if (pingFrame != null) qlogFrame(pingFrame),
+        for (final f in ctrlFrames) qlogFrame(f),
+        for (final f in fcFrames) qlogFrame(f),
+        for (final f in dgramFrames) qlogFrame(f),
+        for (final f in streamFrames) qlogFrame(f),
+      ];
       qlog!.emit(
         'quic:packet_sent',
         packetSentData(
@@ -1275,6 +1285,7 @@ class Connection {
           scid: localCid,
           length: totalLen,
           version: pktType != PacketType.short ? version : null,
+          frames: qframes.isEmpty ? null : qframes,
         ),
       );
     }
@@ -1376,6 +1387,17 @@ class Connection {
         return 'retry';
       case PacketType.versionNegotiation:
         return 'version_negotiation';
+    }
+  }
+
+  static String _qlogPacketNumberSpace(Epoch e) {
+    switch (e) {
+      case Epoch.initial:
+        return 'initial';
+      case Epoch.handshake:
+        return 'handshake';
+      case Epoch.application:
+        return 'application_data';
     }
   }
 
@@ -2086,6 +2108,18 @@ class Connection {
     // permitted.
     if (epoch == Epoch.application) {
       _keyUpdateInFlight = false;
+    }
+    if (qlog != null) {
+      final pns = <int>[];
+      for (final r in ack.ranges.ranges) {
+        for (var p = r.start; p < r.end; p++) {
+          pns.add(p);
+        }
+      }
+      qlog!.emit('quic:packets_acked', {
+        'packet_number_space': _qlogPacketNumberSpace(epoch),
+        'packet_numbers': pns,
+      });
     }
     recovery.onAckReceived(
       peerSentAckRanges: ack.ranges,

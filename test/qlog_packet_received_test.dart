@@ -69,10 +69,14 @@ void main() {
     final rxClient = clientConn.recv(s2cInitial);
     expect(rxClient.epoch, Epoch.initial);
 
-    // Exactly one new event: the packet_received for the server Initial.
-    expect(clientQlog.events.length, clientEventsBefore + 1);
-    final ev = clientQlog.events.last;
-    expect(ev['name'], 'quic:packet_received');
+    // The client emits a packet_received for the server Initial; that
+    // Initial also carries an ACK of the client's CH, so the client
+    // additionally emits a packets_acked. Pick the packet_received.
+    final newEvents = clientQlog.events.skip(clientEventsBefore).toList();
+    expect(newEvents, isNotEmpty);
+    final ev = newEvents.firstWhere(
+      (e) => e['name'] == 'quic:packet_received',
+    );
     final data = ev['data'] as Map<String, Object?>;
     final header = data['header'] as Map<String, Object?>;
     expect(header['packet_type'], 'initial');

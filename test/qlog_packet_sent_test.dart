@@ -61,6 +61,17 @@ void main() {
     expect(header['version'], '00000001');
     final raw = data['raw'] as Map<String, Object?>;
     expect(raw['length'], pkt!.length);
+
+    // Frame breakdown: the Initial carries one CRYPTO frame holding
+    // the ClientHello. Offset is 0, length matches CH wire length.
+    final frames = data['frames'] as List;
+    expect(frames, isNotEmpty);
+    final crypto = frames.firstWhere(
+      (e) => (e as Map)['frame_type'] == 'crypto',
+    ) as Map<String, Object?>;
+    expect(crypto['offset'], 0);
+    expect(crypto['length'], isA<int>());
+    expect((crypto['length'] as int) > 0, isTrue);
   });
 
   test('Connection without qlog sink emits nothing and stays on the '

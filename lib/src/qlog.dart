@@ -13,6 +13,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'frame.dart';
+
 /// Reference time origin used to compute monotonic `time` deltas on
 /// each event (qlog records time as a millisecond offset from a
 /// per-trace reference, not as an absolute wall-clock).
@@ -123,4 +125,160 @@ Map<String, Object?> packetSentData({
     'raw': {'length': length},
     if (frames != null) 'frames': frames,
   };
+}
+
+/// Map a wire [Frame] to its qlog `QuicFrame` JSON shape (cloudflare
+/// quiche `qlog::events::quic::QuicFrame`). Field selection follows
+/// the qlog spec's mandatory-only set per variant — optional fields
+/// (lengths, payload_length, ECN counts) are emitted only when we
+/// actually carry them on the wire.
+Map<String, Object?> qlogFrame(Frame f) {
+  if (f is PaddingFrame) {
+    return {'frame_type': 'padding'};
+  }
+  if (f is PingFrame) {
+    return {'frame_type': 'ping'};
+  }
+  if (f is AckFrame) {
+    final ranges = <List<int>>[];
+    for (final r in f.ranges.ranges) {
+      ranges.add([r.start, r.end - 1]);
+    }
+    return {
+      'frame_type': 'ack',
+      'ack_delay': f.ackDelay,
+      'acked_ranges': ranges,
+      if (f.ecnCounts != null) ...{
+        'ect0': f.ecnCounts!.ect0,
+        'ect1': f.ecnCounts!.ect1,
+        'ce': f.ecnCounts!.ce,
+      },
+    };
+  }
+  if (f is CryptoFrame) {
+    return {
+      'frame_type': 'crypto',
+      'offset': f.data.offset,
+      'length': f.data.len,
+    };
+  }
+  if (f is StreamFrame) {
+    return {
+      'frame_type': 'stream',
+      'stream_id': f.streamId,
+      'offset': f.data.offset,
+      'length': f.data.len,
+      'fin': f.data.fin,
+    };
+  }
+  if (f is NewTokenFrame) {
+    return {'frame_type': 'new_token', 'token': _hex(f.token)};
+  }
+  if (f is MaxDataFrame) {
+    return {'frame_type': 'max_data', 'maximum': f.max};
+  }
+  if (f is MaxStreamDataFrame) {
+    return {
+      'frame_type': 'max_stream_data',
+      'stream_id': f.streamId,
+      'maximum': f.max,
+    };
+  }
+  if (f is MaxStreamsBidiFrame) {
+    return {
+      'frame_type': 'max_streams',
+      'stream_type': 'bidirectional',
+      'maximum': f.max,
+    };
+  }
+  if (f is MaxStreamsUniFrame) {
+    return {
+      'frame_type': 'max_streams',
+      'stream_type': 'unidirectional',
+      'maximum': f.max,
+    };
+  }
+  if (f is DataBlockedFrame) {
+    return {'frame_type': 'data_blocked', 'limit': f.limit};
+  }
+  if (f is StreamDataBlockedFrame) {
+    return {
+      'frame_type': 'stream_data_blocked',
+      'stream_id': f.streamId,
+      'limit': f.limit,
+    };
+  }
+  if (f is StreamsBlockedBidiFrame) {
+    return {
+      'frame_type': 'streams_blocked',
+      'stream_type': 'bidirectional',
+      'limit': f.limit,
+    };
+  }
+  if (f is StreamsBlockedUniFrame) {
+    return {
+      'frame_type': 'streams_blocked',
+      'stream_type': 'unidirectional',
+      'limit': f.limit,
+    };
+  }
+  if (f is ResetStreamFrame) {
+    return {
+      'frame_type': 'reset_stream',
+      'stream_id': f.streamId,
+      'error_code': f.errorCode,
+      'final_size': f.finalSize,
+    };
+  }
+  if (f is StopSendingFrame) {
+    return {
+      'frame_type': 'stop_sending',
+      'stream_id': f.streamId,
+      'error_code': f.errorCode,
+    };
+  }
+  if (f is NewConnectionIdFrame) {
+    return {
+      'frame_type': 'new_connection_id',
+      'sequence_number': f.seqNum,
+      'retire_prior_to': f.retirePriorTo,
+      'connection_id_length': f.connId.length,
+      'connection_id': _hex(f.connId),
+    };
+  }
+  if (f is RetireConnectionIdFrame) {
+    return {
+      'frame_type': 'retire_connection_id',
+      'sequence_number': f.seqNum,
+    };
+  }
+  if (f is PathChallengeFrame) {
+    return {'frame_type': 'path_challenge', 'data': _hex(f.data)};
+  }
+  if (f is PathResponseFrame) {
+    return {'frame_type': 'path_response', 'data': _hex(f.data)};
+  }
+  if (f is ConnectionCloseFrame) {
+    return {
+      'frame_type': 'connection_close',
+      'error_space': 'transport',
+      'error_code': f.errorCode,
+      if (f.reason.isNotEmpty) 'reason': utf8.decode(f.reason, allowMalformed: true),
+    };
+  }
+  if (f is ApplicationCloseFrame) {
+    return {
+      'frame_type': 'connection_close',
+      'error_space': 'application',
+      'error_code': f.errorCode,
+      if (f.reason.isNotEmpty) 'reason': utf8.decode(f.reason, allowMalformed: true),
+    };
+  }
+  if (f is HandshakeDoneFrame) {
+    return {'frame_type': 'handshake_done'};
+  }
+  if (f is DatagramFrame) {
+    return {'frame_type': 'datagram', 'length': f.data.length};
+  }
+  return {'frame_type': 'unknown'};
 }
