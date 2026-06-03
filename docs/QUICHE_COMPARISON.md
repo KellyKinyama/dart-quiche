@@ -75,7 +75,7 @@ means partial / not wired into the public surface; ❌ means absent.
 
 | Area | Rust quiche | dart-quiche |
 |---|---|---|
-| qlog event emission | ✅ | ❌ |
+| qlog event emission | ✅ | ✅ packet_sent/received/acked + recovery:metrics_updated, NDJSON file sink |
 | Stateless retry token signing/verification | ✅ | ✅ |
 | FFI / language bindings | ✅ C, C++, Node, Python | n/a (pure Dart) |
 | Async runtime integration | ✅ tokio-quiche crate | ✅ Dart `Future`/`Stream` natively |
@@ -94,9 +94,8 @@ full matrix, ciphers, body sizes, and reproduction commands.
 1. **PKI chain validation.** Today: leaf SAN + signature only. Next:
    Win32 `CertGetCertificateChain` FFI or a Dart-native chain walker
    against a bundled trust store.
-2. **qlog emission.** Drop-in observability parity with `quiche`.
-3. **BBRv2.** Single biggest throughput delta for lossy paths.
-4. **Extended CONNECT / WebTransport + h3 DATAGRAM framing.**
-5. **Public-Internet 0-RTT probe.** Pipeline is green in-process;
+2. **BBRv2.** Single biggest throughput delta for lossy paths.
+3. **Extended CONNECT / WebTransport + h3 DATAGRAM framing.**
+4. **Public-Internet 0-RTT probe.** Pipeline is green in-process;
    need a probe variant that harvests a real NewSessionTicket on
    one connection and replays it against the same origin.

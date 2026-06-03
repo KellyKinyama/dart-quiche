@@ -67,8 +67,13 @@ version dispatch + v2 Retry integrity, and the full client-side
 derivation, PSK binder HMAC, ClientHello `pre_shared_key` /
 `early_data` emit, long-header 0-RTT packet send, and the
 server-side PSK acceptor that validates the binder and installs the
-early-data Open for in-process e2e 0-RTT decrypt). Current
-count: **425**.
+early-data Open for in-process e2e 0-RTT decrypt), and the
+full qlog event pipeline (`quic:packet_sent` / `packet_received`
+/ `packets_acked` with frame-level breakdowns, plus
+`recovery:metrics_updated` with RTT + congestion-window
+snapshots, emitted via in-memory or NDJSON file sinks whose
+shape mirrors cloudflare/quiche's qlog crate so traces feed
+directly into qvis). Current count: **431**.
 
 ## Remaining gaps
 
@@ -106,6 +111,29 @@ Ordered by impact:
    an app-layer concern and not exercised by the probe.
 
 ## Recently closed
+
+- **qlog event pipeline (draft-ietf-quic-qlog-quic-events).** New
+  `lib/src/qlog.dart` adds a `QlogEmitter` interface with two
+  sinks: `NdjsonQlogEmitter` (one JSON object per line, file-
+  backed) and `MemoryQlogEmitter` (test fixture). Event shape
+  mirrors cloudflare/quiche's `qlog::events::quic` crate —
+  hex-encoded scid/dcid, packet_type spelt `initial` / `handshake`
+  / `1RTT` / `0RTT` / `retry` / `version_negotiation`, RTTs as
+  fractional milliseconds — so traces round-trip through qvis
+  without translation. `Connection` gains an optional `qlog:`
+  field and emits four event families: `quic:packet_sent` with a
+  `frames` array covering every wire-frame variant (commits
+  `20e9e5d`, `05ad125`); `quic:packet_received` on the recv path
+  (`ae1554d`); `quic:packets_acked` with packet-number-space +
+  flattened PNs at the head of `_onAckFrame` (`05ad125`);
+  `recovery:metrics_updated` with `{min_rtt, smoothed_rtt,
+  latest_rtt, rtt_variance, congestion_window, bytes_in_flight}`
+  emitted on send/ack/timeout with diff-suppression so unchanged
+  metrics don't flood the trace (`8f3c82e`). End-to-end NDJSON
+  file round-trip validated by `qlog_ndjson_roundtrip_test`
+  (`ad4e38e`): every line parses, time is monotonic, every
+  emitted name is in the allow-set, and at least one of each
+  family appears in a real Initial leg.
 
 - **0-RTT end-to-end (RFC 9001 §4.6 / RFC 8446 §4.2.11).**
   Client side: NewSessionTicket parse + `ResumptionState` bundling
