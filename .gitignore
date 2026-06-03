@@ -1,0 +1,16 @@
+# https://dart.dev/guides/libraries/private-files
+# Created by `dart pub`
+.dart_tool/
+
+# Local server diagnostic dumps from background runs.
+*.log
+.echo.err
+.echo.out
+.h3s.err
+.h3s.out
+_t.txt
+
+# Editor backups.
+*.swp
+*~
+
