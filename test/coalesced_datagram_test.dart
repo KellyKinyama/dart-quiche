@@ -118,7 +118,8 @@ void main() {
             cid: dcid,
             version: protocolVersionV1,
             isServer: true,
-          );
+          )
+          ..markAddressValidated();
 
     // Stage two separate CRYPTO chunks; each Connection.send call drains
     // *all* flushable CRYPTO bytes into a single CRYPTO frame, so to get

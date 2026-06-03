@@ -14,6 +14,7 @@
 import 'dart:typed_data';
 import 'dart:math';
 
+import 'config.dart' show kMaxAmplificationFactor;
 import 'crypto.dart';
 import 'error.dart';
 import 'flowcontrol.dart';
@@ -271,6 +272,24 @@ class Connection {
   /// draining and no further packets are sent.
   bool _isStatelessReset = false;
 
+  /// Cumulative bytes the peer has handed us via [recvDatagram]
+  /// (RFC 9000 §8.1 "received"). Counted regardless of whether the
+  /// containing packets ultimately decrypted — the amplification cap
+  /// is per-datagram, not per-validated-packet.
+  int _bytesReceived = 0;
+
+  /// Cumulative bytes [send] has emitted on this connection. Compared
+  /// against `3 * _bytesReceived` to enforce the anti-amplification
+  /// limit on the server side before address validation.
+  int _bytesSent = 0;
+
+  /// RFC 9000 §8.1 — "peer address validated". Always true on the
+  /// client; on the server, set to true as soon as a Handshake-epoch
+  /// packet decrypts (proves the peer can read keys derived from a
+  /// secret only the legitimate client could compute). Once true, the
+  /// 3× amplification cap no longer applies.
+  bool _addressValidated;
+
   /// Current application-epoch key phase (RFC 9001 §6). Toggled
   /// whenever a key update is initiated locally or accepted from the
   /// peer.
@@ -316,6 +335,10 @@ class Connection {
        _initialToken = initialToken == null
            ? null
            : Uint8List.fromList(initialToken),
+       // RFC 9000 §8.1 — the client is the one driving the
+       // handshake; only the server needs to enforce the 3×
+       // amplification cap until peer-address validation completes.
+       _addressValidated = !isServer,
        // Clients remember the DCID they chose for the very first Initial
        // so that (a) we can verify a Retry packet's integrity tag and
        // (b) we can later cross-check the server's
@@ -516,6 +539,9 @@ class Connection {
   /// is updated.
   ConnectionRecvInfo recv(Uint8List buf) {
     if (buf.isEmpty) throw QuicError.bufferTooShort;
+    // RFC 9000 §8.1 anti-amplification accounting — count packet bytes
+    // toward the 3× cap regardless of whether decryption succeeds.
+    _bytesReceived += buf.length;
     final isLong = (buf[0] & 0x80) != 0;
 
     final r = Octets.withSlice(Uint8List.fromList(buf));
@@ -650,6 +676,13 @@ class Connection {
     space.recvPktNeedAck.insert(fullPn, fullPn + 1);
     // Successful decrypt resets the idle timer (RFC 9000 §10.1.2).
     _lastActivity = DateTime.now();
+
+    // RFC 9000 §8.1 — a server considers the peer address validated
+    // as soon as it receives a packet protected with Handshake keys.
+    // (Initial keys are derivable by anyone; Handshake keys are not.)
+    if (isServer && !_addressValidated && epoch == Epoch.handshake) {
+      _addressValidated = true;
+    }
 
     // RFC 9000 §7.2: a client MUST adopt the Source Connection ID of
     // the first valid Initial it receives as the Destination Connection
@@ -913,6 +946,18 @@ class Connection {
 
     // RFC 9000 §10.2.2 — draining: silently drop send attempts.
     if (_isDraining) return null;
+
+    // RFC 9000 §8.1 — server-side anti-amplification: stop generating
+    // before we exceed 3× the bytes received from an unvalidated peer.
+    // Generating-then-dropping would leak the consumed CRYPTO/STREAM
+    // offsets, so we bail at the top instead. As _bytesReceived grows
+    // (peer retransmits, sends a fresh Initial), the cap reopens and
+    // the next send() picks up where this one left off.
+    if (isServer &&
+        !_addressValidated &&
+        _bytesSent >= kMaxAmplificationFactor * _bytesReceived) {
+      return null;
+    }
 
     final cc = spaces.crypto(epoch);
     final seal = cc.cryptoSeal;
@@ -1219,6 +1264,7 @@ class Connection {
       now: DateTime.now(),
     );
 
+    _bytesSent += totalLen;
     return Uint8List.fromList(Uint8List.sublistView(buf, 0, totalLen));
   }
 
@@ -1599,6 +1645,27 @@ class Connection {
   /// replay it on a future Initial packet to skip address validation.
   Uint8List? get lastToken => _lastToken;
 
+  /// Cumulative bytes received from the peer via [recvDatagram].
+  int get bytesReceived => _bytesReceived;
+
+  /// Cumulative bytes successfully returned by [send].
+  int get bytesSent => _bytesSent;
+
+  /// RFC 9000 §8.1 \u2014 whether the server has confirmed the peer's
+  /// address. Always true on the client. On the server it flips to
+  /// true on the first decrypted Handshake-epoch packet (or on a
+  /// successfully validated Retry token, when implemented). Until
+  /// then, [send] is capped to `3 * bytesReceived - bytesSent`.
+  bool get addressValidated => _addressValidated;
+
+  /// Mark the peer address as validated outside the Handshake-decrypt
+  /// path \u2014 e.g. the application accepted a NEW_TOKEN replayed by the
+  /// client (RFC 9000 \u00a78.1.3) or validated by some external means. No-op
+  /// on clients (already validated) and once already set.
+  void markAddressValidated() {
+    _addressValidated = true;
+  }
+
   /// Highest connection-wide DATA_BLOCKED limit observed from the
   /// peer (RFC 9000 §19.12). Zero if no DATA_BLOCKED frame has been
   /// received.
@@ -1871,6 +1938,7 @@ class Connection {
       seal,
     );
     space.onPacketSent(pn);
+    _bytesSent += totalLen;
     return Uint8List.fromList(Uint8List.sublistView(buf, 0, totalLen));
   }
 
