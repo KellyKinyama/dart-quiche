@@ -49,3 +49,4 @@ export 'src/stats.dart';
 export 'src/stream.dart';
 export 'src/stream_common.dart';
 export 'src/transport_params.dart';
+export 'src/ticket_store.dart';

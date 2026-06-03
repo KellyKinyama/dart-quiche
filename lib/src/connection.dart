@@ -1366,6 +1366,28 @@ class Connection {
     _zeroRttSendActive = true;
   }
 
+  /// Install server-side 0-RTT (early-data) decryption keys. Once
+  /// installed, incoming long-header 0-RTT packets (`PacketType.zeroRTT`)
+  /// in the Application epoch are decryptable until the handshake
+  /// produces real 1-RTT keys. The server has no per-flight "active"
+  /// flag because outbound packet typing is unaffected.
+  void enableZeroRttRecv({
+    required Algorithm alg,
+    required Uint8List clientEarlyTrafficSecret,
+  }) {
+    if (!isServer) {
+      throw StateError('0-RTT recv is server-only');
+    }
+    if (_handshakeConfirmed) {
+      throw StateError('handshake already confirmed');
+    }
+    spaces.installEarlyDataKeys(
+      alg: alg,
+      clientEarlyTrafficSecret: clientEarlyTrafficSecret,
+      isServer: true,
+    );
+  }
+
   /// Stop emitting 0-RTT packets. Invoked by the TLS driver once
   /// real 1-RTT application keys have been installed.
   void retireZeroRttSend() {
