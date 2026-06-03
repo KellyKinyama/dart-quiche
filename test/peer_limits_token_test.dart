@@ -97,19 +97,97 @@ void main() {
     expect(h.client.peerMaxStreamsUni, 64);
   });
 
-  test('inbound NEW_TOKEN buffers the latest token for the application', () {
+  test('inbound NEW_TOKEN queues tokens for the application', () {
     final h = _handshake();
     expect(h.client.lastToken, isNull);
+    expect(h.client.takeReceivedTokens(), isEmpty);
+
     final tok = Uint8List.fromList(const [1, 2, 3, 4, 5, 6, 7, 8]);
     h.server.queueFrameForTest(NewTokenFrame(tok));
     _ship(h.server, h.client);
-    expect(h.client.lastToken, isNotNull);
     expect(h.client.lastToken, orderedEquals(tok));
 
-    // A second NEW_TOKEN overwrites.
+    // A second NEW_TOKEN appends rather than overwriting; lastToken
+    // peeks at the most recent value without draining.
     final tok2 = Uint8List.fromList(const [9, 9, 9]);
     h.server.queueFrameForTest(NewTokenFrame(tok2));
     _ship(h.server, h.client);
     expect(h.client.lastToken, orderedEquals(tok2));
+
+    final drained = h.client.takeReceivedTokens();
+    expect(drained, hasLength(2));
+    expect(drained[0], orderedEquals(tok));
+    expect(drained[1], orderedEquals(tok2));
+    // Drain clears the queue.
+    expect(h.client.takeReceivedTokens(), isEmpty);
+    expect(h.client.lastToken, isNull);
+  });
+
+  test('server tokenIssuer emits one NEW_TOKEN after handshake', () {
+    final dcid = Uint8List.fromList(const [
+      0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08, //
+    ]);
+    final clientScid = Uint8List.fromList(const [
+      0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, //
+    ]);
+    final serverScid = Uint8List.fromList(const [
+      0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, //
+    ]);
+    final cert = generateSelfSignedP256Cert();
+    final issued = Uint8List.fromList(const [
+      0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, //
+    ]);
+    var calls = 0;
+    final client =
+        Connection(localCid: clientScid, isServer: false, peerCid: dcid)
+          ..spaces.installInitialKeys(
+            cid: dcid,
+            version: protocolVersionV1,
+            isServer: false,
+          );
+    final server = Connection(
+      localCid: serverScid,
+      isServer: true,
+      tokenIssuer: () {
+        calls++;
+        return issued;
+      },
+    )..spaces.installInitialKeys(
+      cid: dcid,
+      version: protocolVersionV1,
+      isServer: true,
+    );
+    final cd = TlsClientDriver(conn: client, hostname: 'localhost');
+    final sd = TlsServerDriver(
+      conn: server,
+      serverCert: cert,
+      originalDcid: dcid,
+    );
+    cd.start();
+    final rxCh = server.recv(client.send(Epoch.initial)!);
+    server.peerCid = rxCh.sourceCid!.bytes;
+    sd.poll();
+    client.recv(server.send(Epoch.initial)!);
+    cd.poll();
+    client.recv(server.send(Epoch.handshake)!);
+    cd.poll();
+    server.recv(client.send(Epoch.handshake)!);
+    sd.poll();
+    final serverHsAck = server.send(Epoch.handshake);
+    if (serverHsAck != null) client.recv(serverHsAck);
+    final clientHsAck = client.send(Epoch.handshake);
+    if (clientHsAck != null) server.recv(clientHsAck);
+    _ship(server, client);
+
+    expect(calls, 1, reason: 'tokenIssuer should be called exactly once');
+    expect(client.lastToken, isNotNull);
+    expect(client.lastToken, orderedEquals(issued));
+
+    // Further application-epoch sends must not produce more tokens.
+    _ship(server, client);
+    expect(calls, 1);
+    final drained = client.takeReceivedTokens();
+    expect(drained, hasLength(1));
+    expect(drained.first, orderedEquals(issued));
   });
 }

@@ -241,10 +241,11 @@ class Connection {
   /// our side.
   int? _localMaxDatagramFrameSize = 65527;
 
-  /// Last NEW_TOKEN frame the server sent us. Kept for the
-  /// application to retrieve via [lastToken] and replay on a
-  /// subsequent 0-RTT or Initial packet.
-  Uint8List? _lastToken;
+  /// Tokens the peer has issued via NEW_TOKEN (RFC 9000 §8.1.3).
+  /// Each entry is a defensive copy and stays here until the
+  /// application drains them with [takeReceivedTokens]; [lastToken]
+  /// exposes the most recently appended entry without draining.
+  final List<Uint8List> _receivedTokens = [];
 
   /// CIDs the peer has issued for us to use as destination, indexed
   /// by sequence number (RFC 9000 §5.1). Seq 0 is the original
@@ -372,6 +373,18 @@ class Connection {
   /// if [pmtud.shouldProbe] would otherwise return true.
   bool discoverPmtu;
 
+  /// Server-side: callback that mints an opaque NEW_TOKEN value to
+  /// hand the client after the handshake confirms. The token is sent
+  /// in a single NEW_TOKEN frame on the application epoch right
+  /// after HANDSHAKE_DONE. Null disables emission (default), which
+  /// preserves the historical no-token behaviour. Ignored on clients.
+  Uint8List Function()? tokenIssuer;
+
+  /// Server-side: true once a NEW_TOKEN frame derived from
+  /// [tokenIssuer] has been queued for the peer. Gates one-shot
+  /// emission so we don't issue a fresh token on every send().
+  bool _newTokenEmitted = false;
+
   Connection({
     required this.localCid,
     required this.isServer,
@@ -383,6 +396,7 @@ class Connection {
     Pacer? pacer,
     int maxSendUdpPayload = 1500,
     this.discoverPmtu = false,
+    this.tokenIssuer,
     Uint8List? initialToken,
     this.qlog,
   }) : spaces = spaces ?? PktNumSpaceMap(),
@@ -857,8 +871,9 @@ class Connection {
         }
       } else if (frame is NewTokenFrame) {
         // RFC 9000 §8.1.3: server-issued token usable on a later
-        // Initial packet from the same client.
-        _lastToken = Uint8List.fromList(frame.token);
+        // Initial packet from the same client. Append; the app
+        // drains via takeReceivedTokens() or peeks via lastToken.
+        _receivedTokens.add(Uint8List.fromList(frame.token));
       } else if (frame is NewConnectionIdFrame) {
         // RFC 9000 §5.1.1: register the new peer-issued CID and
         // honour any retire_prior_to bump by queueing
@@ -1145,6 +1160,20 @@ class Connection {
         !_handshakeDoneSent &&
         cc.cryptoSeal != null) {
       hdFrame = const HandshakeDoneFrame();
+    }
+
+    // Stage 2b': server hands the client a one-shot NEW_TOKEN (RFC 9000
+    // \u00a78.1.3) alongside HANDSHAKE_DONE when a tokenIssuer is configured.
+    if (isServer &&
+        epoch == Epoch.application &&
+        !_newTokenEmitted &&
+        cc.cryptoSeal != null &&
+        tokenIssuer != null) {
+      final tok = tokenIssuer!();
+      if (tok.isNotEmpty) {
+        ctrlFrames.add(NewTokenFrame(Uint8List.fromList(tok)));
+        _newTokenEmitted = true;
+      }
     }
 
     // Stage 3: drain flushable application streams into STREAM frames
@@ -1946,10 +1975,23 @@ class Connection {
     _localMaxDatagramFrameSize = n;
   }
 
-  /// Last NEW_TOKEN value the peer issued (RFC 9000 §8.1.3), or null
-  /// if none has been received. The application may persist this and
-  /// replay it on a future Initial packet to skip address validation.
-  Uint8List? get lastToken => _lastToken;
+  /// Most recent NEW_TOKEN value the peer issued (RFC 9000 §8.1.3),
+  /// or null if none has been received. Non-destructive: the token
+  /// remains in the receive queue. Prefer [takeReceivedTokens] when
+  /// the application has actually persisted the value.
+  Uint8List? get lastToken =>
+      _receivedTokens.isEmpty ? null : _receivedTokens.last;
+
+  /// Drain every NEW_TOKEN value the peer has issued so far, in
+  /// arrival order, and clear the internal queue. The application is
+  /// expected to persist these and replay one on a future Initial via
+  /// the `initialToken:` constructor argument to skip address
+  /// validation (RFC 9000 §8.1.3).
+  List<Uint8List> takeReceivedTokens() {
+    final out = List<Uint8List>.from(_receivedTokens);
+    _receivedTokens.clear();
+    return out;
+  }
 
   /// Cumulative bytes received from the peer via [recvDatagram].
   int get bytesReceived => _bytesReceived;
