@@ -1,3 +1,26 @@
+## 0.1.0-dev.2
+
+- Public API additions in response to xmppx_quic integration feedback
+  (see [`doc/xmppx-feedback-response.md`](doc/xmppx-feedback-response.md)):
+  - `TlsClientDriver` gains `alpns: List<String>` constructor param
+    (default `['h3']`) plus a `negotiatedAlpn` getter parsed from the
+    server's EncryptedExtensions ALPN extension (RFC 7301 §3.2).
+  - `TlsServerDriver` gains `alpn: String` constructor param (default
+    `'h3'`) that is now threaded into the EE flight, plus a
+    `negotiatedAlpn` getter that returns the configured value once the
+    handshake flight has staged.
+  - `Connection.sendNext()` — single-call wrapper over
+    `sendDatagram([Epoch.initial, Epoch.handshake, Epoch.application])`
+    (RFC 9000 §12.2 ordering).
+  - `Connection.closeApplication({appErrorCode, reason})` — ergonomic
+    wrapper around the existing `Connection.close()` for app-level
+    CONNECTION_CLOSE (RFC 9000 §10.2.1).
+- Re-exports promoted to the top-level `package:dart_quiche/dart_quiche.dart`
+  library: `tls_driver.dart`, `tls_handshake.dart`, `cert_utils.dart`
+  (so `TlsClientDriver` / `TlsServerDriver` / `generateSelfSignedP256Cert`
+  no longer require `import 'package:dart_quiche/src/...'`).
+- 491 unit tests (5 new in `test/xmppx_feedback_surface_test.dart`).
+
 ## 0.1.0-dev.1
 
 - First pre-release on pub.dev.
