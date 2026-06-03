@@ -48,7 +48,7 @@ means partial / not wired into the public surface; ❌ means absent.
 | `DATAGRAM` (RFC 9221) | ✅ | ✅ |
 | ACK frames (with ECN counters) | ✅ ECN | ✅ ACK; 🟡 ECN not negotiated |
 | Loss detection (RFC 9002 timer) | ✅ | ✅ |
-| Congestion control | ✅ Reno / CUBIC / BBRv1 / BBRv2 | 🟡 Reno + CUBIC + Hystart++; no BBR |
+| Congestion control | ✅ Reno / CUBIC / BBRv1 / BBRv2 | ✅ Reno + CUBIC + Hystart++; BBRv2 (ProbeRTT + loss-rate inflight_hi cap) |
 | PMTUD | ✅ DPLPMTUD | 🟡 simple probe loop |
 | Pacing | ✅ | 🟡 token bucket, not on the hot send path |
 | Anti-amplification (RFC 9000 §8.1) | ✅ | ✅ (`b0e34c0`) |
@@ -94,8 +94,7 @@ full matrix, ciphers, body sizes, and reproduction commands.
 1. **PKI chain validation.** Today: leaf SAN + signature only. Next:
    Win32 `CertGetCertificateChain` FFI or a Dart-native chain walker
    against a bundled trust store.
-2. **BBRv2.** Single biggest throughput delta for lossy paths.
-3. **Extended CONNECT / WebTransport + h3 DATAGRAM framing.**
-4. **Public-Internet 0-RTT probe.** Pipeline is green in-process;
+2. **Extended CONNECT / WebTransport + h3 DATAGRAM framing.**
+3. **Public-Internet 0-RTT probe.** Pipeline is green in-process;
    need a probe variant that harvests a real NewSessionTicket on
    one connection and replays it against the same origin.

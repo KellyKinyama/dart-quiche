@@ -73,7 +73,11 @@ full qlog event pipeline (`quic:packet_sent` / `packet_received`
 `recovery:metrics_updated` with RTT + congestion-window
 snapshots, emitted via in-memory or NDJSON file sinks whose
 shape mirrors cloudflare/quiche's qlog crate so traces feed
-directly into qvis). Current count: **431**.
+directly into qvis), and a BBRv2 congestion controller (Startup
+/ Drain / ProbeBW gain-cycle, ProbeRTT phase with 4 * MSS cwnd
+clamp on 10s stale-rtprop trigger, and a per-round 2%
+loss-rate inflight_hi cap with BBRBeta=0.7). Current count:
+**435**.
 
 ## Remaining gaps
 
@@ -111,6 +115,27 @@ Ordered by impact:
    an app-layer concern and not exercised by the probe.
 
 ## Recently closed
+
+- **BBRv2 congestion controller**. New `lib/src/bbr.dart` replaces
+  the prior `UnimplementedError` stub behind
+  `CongestionControlAlgorithm.bbr2Gcongestion` with a real two-part
+  port. Install 1 (`d0d693e`): BBRv1 core — windowed-max `BtlBw`
+  filter (10 rounds, monotone deque), Startup at gain 2/ln(2) with
+  the three-strike 1.25x growth detector, Drain at the reciprocal
+  pacing gain until `bytes_in_flight <= BDP`, then ProbeBW with the
+  8-phase `[1.25, 0.75, 1, 1, 1, 1, 1, 1]` gain cycle advanced once
+  per min-RTT; cwnd recomputed each ACK as `max(BDP * gain,
+  4 * MSS)`. Install 2 (`0f98996`): the BBRv2 deltas — explicit
+  `probeRtt` phase (RFC draft-cardwell BBRv2 §4.4: 10s stale-rtprop
+  trigger, 200ms dwell, cwnd clamped to 4 * MSS) and a sticky
+  `inflight_hi` cap fed by per-round loss accounting (when
+  `lost / delivered > 2%` outside Startup, clamp `inflight_hi` to
+  `max(0.7 * bytes_in_flight, 4 * MSS)` so subsequent BDP-target
+  recomputes can't immediately re-grow past the bound). Tests:
+  `bbr_startup_test` drives ramp + plateau rounds to assert
+  Startup-exit into Drain or ProbeBW; `bbr_proberttv2_test` covers
+  the ProbeRTT trigger / dwell / exit cycle and the 5%-loss
+  `inflight_hi` cap.
 
 - **qlog event pipeline (draft-ietf-quic-qlog-quic-events).** New
   `lib/src/qlog.dart` adds a `QlogEmitter` interface with two
