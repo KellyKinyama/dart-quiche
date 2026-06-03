@@ -19,10 +19,13 @@
 // Persistence is the embedding application's responsibility — these are
 // just plain immutable data carriers.
 
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'crypto.dart';
 import 'octets.dart';
+
+const int _resumptionSchemaVersion = 1;
 
 /// A parsed TLS 1.3 NewSessionTicket (handshake type 4), as received
 /// from the peer.
@@ -134,6 +137,58 @@ class SessionTicket {
       receivedAt: receivedAt ?? DateTime.now().toUtc(),
     );
   }
+
+  /// Serialise to a JSON-friendly map. Binary fields are base64-encoded
+  /// (URL-safe, unpadded) and `receivedAt` is rendered as an ISO-8601
+  /// UTC string. Schema is stable across releases — adding fields will
+  /// bump [_resumptionSchemaVersion] inside the enclosing
+  /// [ResumptionState].
+  Map<String, Object?> toJson() => {
+    'ticket_lifetime': ticketLifetime,
+    'ticket_age_add': ticketAgeAdd,
+    'ticket_nonce': base64Url.encode(ticketNonce),
+    'ticket': base64Url.encode(ticket),
+    'max_early_data_size': maxEarlyDataSize,
+    'received_at': receivedAt.toUtc().toIso8601String(),
+  };
+
+  /// Inverse of [toJson]. Throws [FormatException] on malformed input.
+  factory SessionTicket.fromJson(Map<String, Object?> j) {
+    Uint8List b64(String k) {
+      final v = j[k];
+      if (v is! String) {
+        throw FormatException('SessionTicket.fromJson: field "$k" missing or not a string');
+      }
+      return Uint8List.fromList(base64Url.decode(v));
+    }
+    int i(String k) {
+      final v = j[k];
+      if (v is! int) {
+        throw FormatException('SessionTicket.fromJson: field "$k" missing or not an int');
+      }
+      return v;
+    }
+    final mEarly = j['max_early_data_size'];
+    if (mEarly != null && mEarly is! int) {
+      throw const FormatException(
+        'SessionTicket.fromJson: max_early_data_size must be int or null',
+      );
+    }
+    final recv = j['received_at'];
+    if (recv is! String) {
+      throw const FormatException(
+        'SessionTicket.fromJson: received_at must be a string',
+      );
+    }
+    return SessionTicket(
+      ticketLifetime: i('ticket_lifetime'),
+      ticketAgeAdd: i('ticket_age_add'),
+      ticketNonce: b64('ticket_nonce'),
+      ticket: b64('ticket'),
+      maxEarlyDataSize: mEarly as int?,
+      receivedAt: DateTime.parse(recv).toUtc(),
+    );
+  }
 }
 
 /// Everything a QUIC client needs to attempt 0-RTT resumption on a
@@ -189,4 +244,77 @@ class ResumptionState {
   /// True if the ticket is fresh AND the issuing server enabled 0-RTT.
   bool get canAttemptZeroRtt =>
       ticket.supportsEarlyData && ticket.isFresh();
+
+  /// Serialise the full resumption bundle to a JSON-friendly map.
+  ///
+  /// The output is suitable for `jsonEncode` and then writing to disk.
+  /// All binary fields are URL-safe base64. The schema is versioned via
+  /// [_resumptionSchemaVersion]; [fromJson] refuses to parse a newer
+  /// version than it understands.
+  Map<String, Object?> toJson() => {
+    'v': _resumptionSchemaVersion,
+    'host': host,
+    'port': port,
+    'alpn': alpn,
+    'alg': alg.name,
+    'ticket': ticket.toJson(),
+    'resumption_master_secret': base64Url.encode(resumptionMasterSecret),
+    'remote_transport_params': base64Url.encode(remoteTransportParams),
+    if (serverCertSpkiHash != null)
+      'server_cert_spki_hash': base64Url.encode(serverCertSpkiHash!),
+  };
+
+  /// Inverse of [toJson]. Throws [FormatException] on malformed or
+  /// future-versioned input.
+  factory ResumptionState.fromJson(Map<String, Object?> j) {
+    final v = j['v'];
+    if (v is! int || v > _resumptionSchemaVersion) {
+      throw FormatException(
+        'ResumptionState.fromJson: unsupported schema version "$v" '
+        '(this build understands up to $_resumptionSchemaVersion)',
+      );
+    }
+    final host = j['host'];
+    final port = j['port'];
+    final alpn = j['alpn'];
+    final algName = j['alg'];
+    final ticketJson = j['ticket'];
+    final rms = j['resumption_master_secret'];
+    final rtp = j['remote_transport_params'];
+    if (host is! String ||
+        port is! int ||
+        alpn is! String ||
+        algName is! String ||
+        ticketJson is! Map ||
+        rms is! String ||
+        rtp is! String) {
+      throw const FormatException(
+        'ResumptionState.fromJson: missing or mis-typed required field',
+      );
+    }
+    final alg = Algorithm.values.firstWhere(
+      (a) => a.name == algName,
+      orElse: () => throw FormatException(
+        'ResumptionState.fromJson: unknown algorithm "$algName"',
+      ),
+    );
+    final spki = j['server_cert_spki_hash'];
+    if (spki != null && spki is! String) {
+      throw const FormatException(
+        'ResumptionState.fromJson: server_cert_spki_hash must be a string',
+      );
+    }
+    return ResumptionState(
+      host: host,
+      port: port,
+      alpn: alpn,
+      alg: alg,
+      ticket: SessionTicket.fromJson(ticketJson.cast<String, Object?>()),
+      resumptionMasterSecret: Uint8List.fromList(base64Url.decode(rms)),
+      remoteTransportParams: Uint8List.fromList(base64Url.decode(rtp)),
+      serverCertSpkiHash: spki == null
+          ? null
+          : Uint8List.fromList(base64Url.decode(spki as String)),
+    );
+  }
 }
