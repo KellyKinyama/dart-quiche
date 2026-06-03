@@ -1,0 +1,7 @@
+# Files excluded from `dart pub publish` but kept in git.
+webtransport.node
+.echo.err
+.echo.out
+.h3s.err
+.h3s.out
+*.log

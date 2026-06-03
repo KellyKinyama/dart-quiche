@@ -526,7 +526,7 @@ class Connection {
   Uint8List? get originalDestinationConnectionId =>
       _originalDestConnectionId == null
           ? null
-          : Uint8List.fromList(_originalDestConnectionId!);
+          : Uint8List.fromList(_originalDestConnectionId);
 
   /// SCID from the Retry packet, if one was accepted; the server
   /// must echo this back via `retry_source_connection_id`.

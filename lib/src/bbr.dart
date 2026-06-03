@@ -139,7 +139,6 @@ class Bbr2Ops extends CongestionControlOps {
   DateTime? _minRttStamp;
   Duration? _minRttCached;
   DateTime? _probeRttDoneStamp;
-  BbrState _stateBeforeProbeRtt = BbrState.probeBw;
 
   // Per-round loss accounting for the BBRv2 loss-rate bound.
   int _roundDeliveredAtRoundStart = 0;
@@ -339,7 +338,6 @@ class Bbr2Ops extends CongestionControlOps {
   }
 
   void _enterProbeRtt(DateTime now) {
-    _stateBeforeProbeRtt = state;
     state = BbrState.probeRtt;
     // Pacing keeps the unit gain while we drain; cwnd is clamped by
     // the caller using _probeRttCwndPackets.

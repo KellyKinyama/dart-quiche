@@ -9,9 +9,9 @@ and WebTransport are all implemented in Dart on top of
 **HEAD:** `cb60fce` (main) · **Tests:** 486/486 unit · **Interop:** 9/9
 public-Internet HTTP/3 servers reachable.
 
-See [docs/QUICHE_COMPARISON.md](docs/QUICHE_COMPARISON.md) for the
+See [doc/QUICHE_COMPARISON.md](doc/QUICHE_COMPARISON.md) for the
 feature-by-feature parity table against the Rust reference, and
-[docs/INTEROP.md](docs/INTEROP.md) for the live-server matrix.
+[doc/INTEROP.md](doc/INTEROP.md) for the live-server matrix.
 
 ## What's in the box
 
@@ -82,8 +82,8 @@ bin/public_probe.dart       Live-Internet H3 GET probe
 bin/public_probe_0rtt.dart  Two-connection 0-RTT harvest + replay
 bin/interop_*.dart          Interop smoke harnesses
 test/                       486 unit tests
-docs/QUICHE_COMPARISON.md   Feature parity vs Rust quiche
-docs/INTEROP.md             Live-server interop matrix
+doc/QUICHE_COMPARISON.md    Feature parity vs Rust quiche
+doc/INTEROP.md              Live-server interop matrix
 ```
 
 ## Running the tests

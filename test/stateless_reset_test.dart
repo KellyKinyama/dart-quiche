@@ -10,7 +10,6 @@ import 'dart:typed_data';
 
 import 'package:dart_quiche/dart_quiche.dart';
 import 'package:dart_quiche/src/cert_utils.dart';
-import 'package:dart_quiche/src/error.dart';
 import 'package:dart_quiche/src/handshake_keys.dart';
 import 'package:dart_quiche/src/tls_driver.dart';
 import 'package:test/test.dart';
