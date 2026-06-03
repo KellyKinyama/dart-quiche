@@ -2,7 +2,7 @@
 
 Snapshot date: 2026-06-03.
 Rust `quiche` reference HEAD: `0ddcd658` (master).
-dart-quiche HEAD: `877e5b4` (main), 484/484 unit tests passing, 9/9
+dart-quiche HEAD: `490ce86` (main), 485/485 unit tests passing, 9/9
 public-Internet HTTP/3 servers reachable (see [INTEROP.md](INTEROP.md)).
 
 This is a working comparison kept beside the interop matrix. It is
@@ -55,7 +55,7 @@ means partial / not wired into the public surface; ❌ means absent.
 | Path validation (`PATH_CHALLENGE` / `PATH_RESPONSE`) | ✅ | ✅ frames + state; socket swap is app-layer |
 | Connection migration (active rebind) | ✅ | 🟡 state machine ready; rebind is app concern |
 | `NEW_CONNECTION_ID` / `RETIRE_CONNECTION_ID` | ✅ | ✅ |
-| `NEW_TOKEN` (server emit + client store) | ✅ | 🟡 parse-only; no persistence |
+| `NEW_TOKEN` (server emit + client store) | ✅ | ✅ server emits one frame after handshake via `tokenIssuer` callback; client queues all received tokens, drainable via `takeReceivedTokens()` (`490ce86`) |
 
 ## HTTP/3 + QPACK
 

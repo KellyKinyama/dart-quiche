@@ -87,7 +87,7 @@ draft-ietf-webtrans-http3 §5 with a partial-buffer reassembler;
 and per-session unidirectional (`0x54`) + bidirectional
 (WEBTRANSPORT_STREAM `0x41`) streams allocated past the H3
 demux probe range so they round-trip through raw QUIC stream
-IO). Current count: **484**.
+IO). Current count: **485**.
 
 ## Remaining gaps
 
@@ -133,6 +133,20 @@ Ordered by impact:
    an app-layer concern and not exercised by the probe.
 
 ## Recently closed
+
+- **`NEW_TOKEN` round-trip (RFC 9000 §8.1.3).** `Connection`
+  (`490ce86`) takes an optional `tokenIssuer: Uint8List Function()?`
+  constructor argument; on the server, the application-epoch `send()`
+  enqueues exactly one `NEW_TOKEN` frame alongside HANDSHAKE_DONE,
+  gated by `_newTokenEmitted` so repeated `send()` calls never
+  re-emit. The client side now buffers every received NEW_TOKEN
+  in a FIFO queue: `lastToken` peeks at the most recent value
+  without draining, and `takeReceivedTokens()` drains the queue
+  for the application to persist and replay on a future Initial
+  via the existing `initialToken:` constructor argument. Default
+  behaviour with `tokenIssuer == null` leaves the wire unchanged.
+  Covered by `peer_limits_token_test` (queue semantics + server
+  auto-emit assertion).
 
 - **Token-bucket pacer on the hot send path (RFC 9002 §7.7).** New
   `lib/src/pacer.dart` (`877e5b4`) adds a `Pacer` with `rate`
