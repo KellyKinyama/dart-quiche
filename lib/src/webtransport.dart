@@ -20,12 +20,103 @@ import 'dart:typed_data';
 
 import 'h3_connection.dart';
 import 'h3_header.dart';
+import 'octets.dart';
 
 /// The well-known `:protocol` value advertised by a WebTransport
 /// session (RFC 9220 IANA "Upgrade Token Registry").
 final Uint8List webtransportProtocol = Uint8List.fromList(const [
   0x77, 0x65, 0x62, 0x74, 0x72, 0x61, 0x6e, 0x73, 0x70, 0x6f, 0x72, 0x74,
 ]);
+
+/// WebTransport capsule types (draft-ietf-webtrans-http3 §5,
+/// registered in the HTTP Capsule Types registry).
+class WtCapsuleType {
+  /// `CLOSE_WEBTRANSPORT_SESSION` — application-level session close
+  /// carrying a 32-bit error code + UTF-8 reason. Either peer may
+  /// send it; receipt indicates the peer considers the session
+  /// closed.
+  static const int closeSession = 0x2843;
+
+  /// `DRAIN_WEBTRANSPORT_SESSION` — request that the peer stop
+  /// initiating new streams / datagrams on this session; existing
+  /// activity may complete. Payload is empty.
+  static const int drainSession = 0x78ae;
+}
+
+/// One decoded WebTransport capsule. [type] is a varint from the
+/// HTTP Capsule Types registry; [payload] is the raw value.
+class WtCapsule {
+  final int type;
+  final Uint8List payload;
+  const WtCapsule(this.type, this.payload);
+
+  /// Convenience: parse a `CLOSE_WEBTRANSPORT_SESSION` payload into
+  /// (errorCode, reason). Returns null if [type] is not closeSession.
+  (int errorCode, Uint8List reason)? asClose() {
+    if (type != WtCapsuleType.closeSession) return null;
+    if (payload.length < 4) return null;
+    final ec = ByteData.sublistView(payload, 0, 4).getUint32(0);
+    final reason = Uint8List.sublistView(payload, 4);
+    return (ec, reason);
+  }
+}
+
+/// Encode a single HTTP/3 capsule (RFC 9297 §3.2):
+/// `Capsule { Type (i), Length (i), Value (..) }`.
+Uint8List encodeCapsule(int type, Uint8List value) {
+  final tyLen = varintLen(type);
+  final lnLen = varintLen(value.length);
+  final out = Uint8List(tyLen + lnLen + value.length);
+  final b = Octets.withSlice(out);
+  b.putVarint(type);
+  b.putVarint(value.length);
+  out.setRange(b.off, b.off + value.length, value);
+  return out;
+}
+
+/// Encode a `CLOSE_WEBTRANSPORT_SESSION` capsule body
+/// (draft-ietf-webtrans-http3 §5.3): 32-bit application error code
+/// followed by an optional UTF-8 reason. Reason MUST be at most
+/// 1024 bytes.
+Uint8List encodeCloseSessionCapsule(int errorCode, [Uint8List? reason]) {
+  final r = reason ?? Uint8List(0);
+  if (r.length > 1024) {
+    throw ArgumentError(
+      'CLOSE_WEBTRANSPORT_SESSION reason MUST NOT exceed 1024 bytes',
+    );
+  }
+  final out = Uint8List(4 + r.length);
+  ByteData.sublistView(out, 0, 4).setUint32(0, errorCode);
+  out.setRange(4, 4 + r.length, r);
+  return encodeCapsule(WtCapsuleType.closeSession, out);
+}
+
+/// Encode a `DRAIN_WEBTRANSPORT_SESSION` capsule (empty payload).
+Uint8List encodeDrainSessionCapsule() =>
+    encodeCapsule(WtCapsuleType.drainSession, Uint8List(0));
+
+/// Try to peel a single capsule off the front of [buf]. Returns
+/// (capsule, bytesConsumed) on success, or null when [buf] does not
+/// yet contain a complete capsule (Type / Length / Value all
+/// present). Caller is responsible for buffering across H3 DATA
+/// frame boundaries before re-entering.
+(WtCapsule capsule, int consumed)? parseCapsule(Uint8List buf) {
+  final b = Octets.withSlice(buf);
+  final int ty;
+  final int ln;
+  try {
+    ty = b.getVarint();
+    ln = b.getVarint();
+  } on Object {
+    return null;
+  }
+  final headerLen = b.off;
+  if (buf.length - headerLen < ln) return null;
+  final payload = Uint8List.sublistView(
+    buf, headerLen, headerLen + ln,
+  );
+  return (WtCapsule(ty, payload), headerLen + ln);
+}
 
 /// Opaque handle to one WebTransport session sitting on top of an
 /// [H3Connection]. The session is identified by its underlying
@@ -141,5 +232,44 @@ class WebTransportSession {
   /// direction). After this call the session id MUST NOT be reused.
   void close() {
     h3.sendData(streamId, Uint8List(0), fin: true);
+  }
+
+  /// Application-level session close (draft-ietf-webtrans-http3
+  /// §5.3): emit a CLOSE_WEBTRANSPORT_SESSION capsule carrying
+  /// [errorCode] (and optional UTF-8 [reason], max 1024 bytes) on
+  /// the CONNECT stream, followed by FIN. The peer will surface the
+  /// capsule via [feedCapsuleData].
+  void closeSession(int errorCode, {Uint8List? reason}) {
+    final capsule = encodeCloseSessionCapsule(errorCode, reason);
+    h3.sendData(streamId, capsule, fin: true);
+  }
+
+  /// Request that the peer initiate no new streams / datagrams on
+  /// this session (draft-ietf-webtrans-http3 §5.4 — DRAIN). The
+  /// CONNECT stream stays open; existing activity is allowed to
+  /// finish.
+  void drain() {
+    h3.sendData(streamId, encodeDrainSessionCapsule());
+  }
+
+  /// Capsule receive buffer (RFC 9297 §3.2: capsules MAY span
+  /// multiple H3 DATA frames).
+  final List<int> _capsuleBuf = [];
+
+  /// Feed raw bytes received in an [H3DataEvent] for this session's
+  /// stream into the capsule parser. Returns every fully-buffered
+  /// capsule peeled off the resulting stream; partial trailing
+  /// bytes are retained for the next call.
+  List<WtCapsule> feedCapsuleData(Uint8List bytes) {
+    _capsuleBuf.addAll(bytes);
+    final out = <WtCapsule>[];
+    while (_capsuleBuf.isNotEmpty) {
+      final view = Uint8List.fromList(_capsuleBuf);
+      final parsed = parseCapsule(view);
+      if (parsed == null) break;
+      out.add(parsed.$1);
+      _capsuleBuf.removeRange(0, parsed.$2);
+    }
+    return out;
   }
 }
