@@ -35,6 +35,7 @@ export 'src/pkt_num_space_map.dart';
 export 'src/pmtud.dart';
 export 'src/prr.dart';
 export 'src/qpack.dart';
+export 'src/qlog.dart';
 export 'src/rand.dart';
 export 'src/range_buf.dart';
 export 'src/ranges.dart';

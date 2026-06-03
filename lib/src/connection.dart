@@ -29,6 +29,7 @@ import 'range_buf.dart';
 import 'recovery_config.dart';
 import 'sent.dart';
 import 'stream.dart';
+import 'qlog.dart';
 import 'transport_params.dart';
 
 /// Outcome of `Connection.recv` for a single QUIC packet.
@@ -80,6 +81,12 @@ class Connection {
 
   /// True if this endpoint is the server.
   final bool isServer;
+
+  /// Optional qlog event sink. When non-null the connection emits
+  /// `quic:packet_sent` (RFC qlog QUIC schema) on every successful
+  /// send so embedders can build qvis-compatible traces. Set via the
+  /// `qlog:` constructor parameter or `conn.qlog = ...` afterwards.
+  QlogEmitter? qlog;
 
   /// Per-epoch packet-number space + crypto context store.
   final PktNumSpaceMap spaces;
@@ -338,6 +345,7 @@ class Connection {
     PktNumSpaceMap? spaces,
     LegacyRecovery? recovery,
     Uint8List? initialToken,
+    this.qlog,
   }) : spaces = spaces ?? PktNumSpaceMap(),
        recovery = recovery ?? LegacyRecovery.fromConfig(const RecoveryConfig()),
        _initialToken = initialToken == null
@@ -1243,6 +1251,20 @@ class Connection {
     space.onPacketSent(pn);
     space.ackElicited = false;
 
+    if (qlog != null) {
+      qlog!.emit(
+        'quic:packet_sent',
+        packetSentData(
+          packetType: _qlogPacketType(pktType),
+          packetNumber: pn,
+          dcid: dcid,
+          scid: localCid,
+          length: totalLen,
+          version: pktType != PacketType.short ? version : null,
+        ),
+      );
+    }
+
     // Register the freshly-sent packet with the loss-recovery state
     // machine. We collect just the frames that carry retransmittable
     // payload (CRYPTO + STREAM) so that when this packet is later
@@ -1301,8 +1323,7 @@ class Connection {
     return out;
   }
 
-  static Epoch _epochFor(PacketType t) {
-    switch (t) {
+  static Epoch _epochFor(PacketType t) {    switch (t) {
       case PacketType.initial:
         return Epoch.initial;
       case PacketType.handshake:
@@ -1324,6 +1345,23 @@ class Connection {
         return PacketType.handshake;
       case Epoch.application:
         return PacketType.short;
+    }
+  }
+
+  static String _qlogPacketType(PacketType t) {
+    switch (t) {
+      case PacketType.initial:
+        return 'initial';
+      case PacketType.handshake:
+        return 'handshake';
+      case PacketType.zeroRTT:
+        return '0RTT';
+      case PacketType.short:
+        return '1RTT';
+      case PacketType.retry:
+        return 'retry';
+      case PacketType.versionNegotiation:
+        return 'version_negotiation';
     }
   }
 
