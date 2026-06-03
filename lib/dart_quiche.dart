@@ -25,6 +25,7 @@ export 'src/h3_frame.dart';
 export 'src/h3_header.dart';
 export 'src/h3_stream.dart';
 export 'src/h3_connection.dart';
+export 'src/webtransport.dart';
 export 'src/huffman.dart';
 export 'src/hystart.dart';
 export 'src/legacy_recovery.dart';
