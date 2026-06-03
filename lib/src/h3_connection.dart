@@ -184,6 +184,19 @@ class H3Connection {
   // Queue of pending events ready for [pollEvent].
   final List<H3Event> _events = [];
 
+  /// Whether the peer has advertised SETTINGS_H3_DATAGRAM=1
+  /// (RFC 9297). HTTP/3 Datagrams must not be sent before this is
+  /// observed and before the QUIC layer's RFC 9221
+  /// max_datagram_frame_size is non-zero in both directions.
+  bool _peerH3DatagramEnabled = false;
+  bool get peerH3DatagramEnabled => _peerH3DatagramEnabled;
+
+  /// Whether the peer has advertised
+  /// SETTINGS_ENABLE_CONNECT_PROTOCOL=1 (RFC 9220 §3), gating
+  /// Extended CONNECT / `:protocol` request emission.
+  bool _peerEnableConnectProtocol = false;
+  bool get peerEnableConnectProtocol => _peerEnableConnectProtocol;
+
   /// Largest QPACK dynamic table size we are willing to maintain for
   /// inbound encoder-stream insertions.
   static const int _ourQpackMaxCapacity = 4096;
@@ -230,11 +243,18 @@ class H3Connection {
       Uint8List.fromList(const [qpackDecoderStreamTypeId]),
     );
 
-    // Write an initial SETTINGS frame on the control stream.
+    // Write an initial SETTINGS frame on the control stream. We
+    // advertise H3_DATAGRAM=1 (RFC 9297) and
+    // SETTINGS_ENABLE_CONNECT_PROTOCOL=1 (RFC 9220) unconditionally;
+    // the peer is free to ignore either, and we gate any actual
+    // datagram / Extended CONNECT emission on observing the matching
+    // bit in their SETTINGS.
     final settings = H3SettingsFrame(
       qpackMaxTableCapacity: _ourQpackMaxCapacity,
       qpackBlockedStreams: 0,
       maxFieldSectionSize: 1 << 16,
+      h3Datagram: 1,
+      connectProtocolEnabled: 1,
     );
     final scratch = Uint8List(256);
     final n = settings.toBytes(Octets.withSlice(scratch));
@@ -347,6 +367,59 @@ class H3Connection {
   /// Send additional DATA bytes on an open request stream.
   void sendData(int streamId, Uint8List body, {bool fin = false}) {
     _writeData(streamId, body, fin: fin);
+  }
+
+  /// Send an HTTP/3 Datagram (RFC 9297) bound to [streamId].
+  ///
+  /// The wire format is `Quarter-Stream-ID (varint) || payload`,
+  /// shipped via a QUIC DATAGRAM frame (RFC 9221). The Quarter
+  /// Stream ID is `streamId / 4`, which requires that [streamId] is
+  /// a client-initiated bidi (`streamId & 0x3 == 0`) per RFC 9297
+  /// §2.1.
+  ///
+  /// Returns the QUIC layer's [Connection.dgramSend] enqueue result
+  /// (`>= 0` on success). Throws [StateError] if the peer has not
+  /// advertised SETTINGS_H3_DATAGRAM=1.
+  int sendH3Datagram(int streamId, Uint8List payload) {
+    if ((streamId & 0x3) != 0) {
+      throw ArgumentError(
+        'H3 datagram requires a client-initiated bidi stream id '
+        '(streamId & 0x3 == 0); got $streamId',
+      );
+    }
+    if (!_peerH3DatagramEnabled) {
+      throw StateError(
+        'peer has not advertised SETTINGS_H3_DATAGRAM=1',
+      );
+    }
+    final quarter = streamId >> 2;
+    final buf = Uint8List(varintLen(quarter) + payload.length);
+    final b = Octets.withSlice(buf);
+    b.putVarint(quarter);
+    b.putBytes(payload);
+    return conn.dgramSend(buf);
+  }
+
+  /// Drain one HTTP/3 Datagram (RFC 9297) from the QUIC receive
+  /// queue, decoding its Quarter Stream ID prefix.
+  ///
+  /// Returns `(streamId, payload)` or `null` if no QUIC DATAGRAM is
+  /// queued. Malformed datagrams (truncated varint) are skipped
+  /// silently — RFC 9297 §5 allows the receiver to drop them
+  /// rather than tear the session down.
+  (int, Uint8List)? recvH3Datagram() {
+    while (true) {
+      final raw = conn.dgramRecv();
+      if (raw == null) return null;
+      try {
+        final b = Octets.withSlice(raw);
+        final quarter = b.getVarint();
+        final payload = Uint8List.sublistView(raw, b.off);
+        return (quarter << 2, payload);
+      } on Object {
+        continue;
+      }
+    }
   }
 
   void _writeHeaders(
@@ -477,6 +550,12 @@ class H3Connection {
                   ? peerCap
                   : _ourQpackMaxCapacity;
               _qpackEnc.setCapacity(cap);
+            }
+            if ((f.h3Datagram ?? 0) == 1) {
+              _peerH3DatagramEnabled = true;
+            }
+            if ((f.connectProtocolEnabled ?? 0) == 1) {
+              _peerEnableConnectProtocol = true;
             }
             _events.add(H3SettingsEvent(f));
           }
