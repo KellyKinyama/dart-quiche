@@ -2,7 +2,7 @@
 
 Snapshot date: 2026-06-03.
 Rust `quiche` reference HEAD: `0ddcd658` (master).
-dart-quiche HEAD: `528e9fd` (main), 458/458 unit tests passing, 9/9
+dart-quiche HEAD: `877e5b4` (main), 484/484 unit tests passing, 9/9
 public-Internet HTTP/3 servers reachable (see [INTEROP.md](INTEROP.md)).
 
 This is a working comparison kept beside the interop matrix. It is
@@ -49,8 +49,8 @@ means partial / not wired into the public surface; ❌ means absent.
 | ACK frames (with ECN counters) | ✅ ECN | ✅ ACK; 🟡 ECN not negotiated |
 | Loss detection (RFC 9002 timer) | ✅ | ✅ |
 | Congestion control | ✅ Reno / CUBIC / BBRv1 / BBRv2 | ✅ Reno + CUBIC + Hystart++; BBRv2 (ProbeRTT + loss-rate inflight_hi cap) |
-| PMTUD | ✅ DPLPMTUD | 🟡 simple probe loop |
-| Pacing | ✅ | 🟡 token bucket, not on the hot send path |
+| PMTUD | ✅ DPLPMTUD | ✅ opt-in DPLPMTUD probe loop on the 1-RTT app epoch (`8375b78`) |
+| Pacing | ✅ | ✅ token-bucket pacer debited on the hot send path (`877e5b4`) |
 | Anti-amplification (RFC 9000 §8.1) | ✅ | ✅ (`b0e34c0`) |
 | Path validation (`PATH_CHALLENGE` / `PATH_RESPONSE`) | ✅ | ✅ frames + state; socket swap is app-layer |
 | Connection migration (active rebind) | ✅ | 🟡 state machine ready; rebind is app concern |
@@ -66,7 +66,7 @@ means partial / not wired into the public surface; ❌ means absent.
 | HEADERS + DATA + fin (req + resp) | ✅ | ✅ |
 | Server PUSH | ✅ | ❌ |
 | QPACK static table | ✅ | ✅ |
-| QPACK dynamic table | ✅ insert + evict | 🟡 decoder reads, encoder static-only |
+| QPACK dynamic table | ✅ insert + evict | ✅ decoder reads + encoder proactive inserts above a tunable repeat threshold (`cb9c713`) |
 | QPACK Huffman | ✅ | ✅ |
 | Extended CONNECT (RFC 9220 / WebTransport) | ✅ | ✅ `sendExtendedConnect` + `extendedConnectProtocol` recogniser (`47d22a9`) |
 | h3 DATAGRAM (RFC 9297) | ✅ | ✅ `sendH3Datagram` / `recvH3Datagram` w/ quarter-stream-id (`8f8f5f5`) |
@@ -95,9 +95,11 @@ full matrix, ciphers, body sizes, and reproduction commands.
 1. **PKI chain validation.** Today: leaf SAN + signature only. Next:
    Win32 `CertGetCertificateChain` FFI or a Dart-native chain walker
    against a bundled trust store.
-2. **Public-Internet 0-RTT probe.** Pipeline is green in-process;
-   need a probe variant that harvests a real NewSessionTicket on
-   one connection and replays it against the same origin.
-3. **QPACK encoder dynamic-table inserts.** Decoder already honours
-   peer inserts; the encoder is still static-table only.
-4. **DPLPMTUD + a real pacing slot on the hot send path.**
+2. **0-RTT acceptance on the public Internet.** The harvest/replay
+   probe binary [`bin/public_probe_0rtt.dart`](../bin/public_probe_0rtt.dart)
+   (`ea8fadd`) round-trips a NewSessionTicket through
+   `ResumptionState.toJson` / `fromJson` (`44e9fd7`) and stages a
+   true 0-RTT second flight — but Cloudflare currently rejects the
+   PSK binder. Need to chase binder math + transport-parameter
+   reapply against a more lenient origin (or fix whatever Cloudflare
+   is unhappy with).

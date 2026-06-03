@@ -87,7 +87,7 @@ draft-ietf-webtrans-http3 §5 with a partial-buffer reassembler;
 and per-session unidirectional (`0x54`) + bidirectional
 (WEBTRANSPORT_STREAM `0x41`) streams allocated past the H3
 demux probe range so they round-trip through raw QUIC stream
-IO). Current count: **458**.
+IO). Current count: **484**.
 
 ## Remaining gaps
 
@@ -107,16 +107,24 @@ Ordered by impact:
    delivered). The probe now hex-dumps the failing datagram so the
    next reproduction will surface its wire content.
 
-3. **0-RTT replay on the public Internet.** The full 0-RTT pipeline
-   is now wired end-to-end in-process (client emits the
+3. **0-RTT acceptance on the public Internet.** The full pipeline
+   is wired end-to-end in-process (client emits the
    `pre_shared_key` + `early_data` ClientHello and a long-header
    0-RTT app-stream packet; server's `TlsServerDriver` validates
    the binder against a `TicketStore` entry and installs the
    early-data Open keyed on `client_early_traffic_secret`;
    `zero_rtt_e2e_test` decrypts the 0-RTT packet under that Open).
-   What remains is a public-Internet probe variant that harvests a
-   real NewSessionTicket on one connection and replays it on a
-   second connection against the same origin.
+   The harvest/replay probe binary
+   [`bin/public_probe_0rtt.dart`](../bin/public_probe_0rtt.dart)
+   (`ea8fadd`) round-trips a NewSessionTicket through
+   `ResumptionState.toJson` / `fromJson` (`44e9fd7`) and stages a
+   true 0-RTT second flight; against `cloudflare-quic.com` the
+   harvest leg works (64800 s lifetime ticket,
+   `max_early_data = 0xffffffff`, 77 B remembered TP, 32 B RMS)
+   but the replay leg currently exits with the server rejecting
+   the PSK binder. Next step is to chase binder-math /
+   transport-parameter parity against a more lenient origin (or
+   diagnose whatever Cloudflare is unhappy with).
 
 4. **Connection migration — active socket swap.** `PATH_CHALLENGE` /
    `PATH_RESPONSE` are wired in the connection state machine
@@ -125,6 +133,77 @@ Ordered by impact:
    an app-layer concern and not exercised by the probe.
 
 ## Recently closed
+
+- **Token-bucket pacer on the hot send path (RFC 9002 §7.7).** New
+  `lib/src/pacer.dart` (`877e5b4`) adds a `Pacer` with `rate`
+  (bytes/sec; sentinel `pacerRateUnlimited` disables), `burst`
+  (defaults to one initial MTU), `untilReady(numBytes, now)`,
+  `onSent(numBytes, now)`, `setRate`, and `reset`. Refill is driven
+  off caller-supplied `now` so tests stay deterministic. `Connection`
+  gains a `pacer` field and both send paths — normal build/encrypt
+  and CONNECTION_CLOSE — debit the bucket on every emit regardless
+  of epoch or PMTU-probe status. Default rate is unlimited so
+  existing call sites are byte-identical; embedders that want
+  congestion-controlled pacing build `Pacer(rate: ...)` themselves
+  or call `conn.pacer.setRate(...)` from a BBR feedback loop.
+  Covered by `pacer_test` (7 token-bucket unit tests) and
+  `connection_pacer_integration_test` (2 tests asserting the bucket
+  is debited by a real `Connection.send`).
+
+- **DPLPMTUD wiring (RFC 8899 / RFC 9000 §14.3).** `Connection`
+  (`8375b78`) grows a `pmtud` field plus an opt-in `discoverPmtu`
+  constructor flag (defaults `false` to preserve the per-packet
+  payload budget existing tests rely on). When the flag is set,
+  the application-epoch `send()` checks `pmtud.shouldProbe()` on
+  every short-header packet (never on Initial / Handshake / 0-RTT),
+  attaches a PING when the packet has no ack-eliciting payload
+  yet, pads to `pmtud.getProbeSize()` with a single PADDING frame,
+  and tags the resulting `Sent` record with `isPmtudProbe: true`.
+  `_onAckFrame` classifies the in-flight probe: ack-range
+  containment → `pmtud.successfulProbe`; `largestAcked ≥ probePn + 3`
+  with the probe pn still unacked → `pmtud.failedProbe`.
+  `pmtud_probe_test` covers both opt-in (1500 B padded probe whose
+  ACK lifts `getCurrentMtu` from 1200 to 1500) and opt-out
+  (baseline 1200 B with no probe) paths.
+
+- **QPACK encoder proactive dynamic-table inserts (RFC 9204 §2.2).**
+  `lib/src/qpack.dart` `QpackEncoder` (`cb9c713`) now tracks a
+  per-(name,value) frequency map and, when the peer-advertised
+  dynamic-table capacity is non-zero, inserts any header pair
+  whose frequency ≥ `insertionThreshold` (default 2) and which
+  isn't already fully covered by the static table or present in
+  the dynamic table. Freshly-inserted entries are reachable in
+  the same-call resolution pass via `_dyn.findFullMatch` so the
+  block that triggered the insert already ships dynamic-indexed
+  references (1–2 bytes). `H3Connection` already calls
+  `_qpackEnc.setCapacity(min(peerCap, _ourQpackMaxCapacity))`
+  when peer SETTINGS arrives, so no h3-layer change was needed.
+  `qpack_encoder_proactive_test` (6 tests) asserts threshold
+  semantics, dynamic-index emission on the second encode, and
+  capacity-0 fallback.
+
+- **0-RTT public-probe binary + `ResumptionState` JSON
+  serialisation.** `SessionTicket.toJson` / `fromJson` and
+  `ResumptionState.toJson` / `fromJson` (`44e9fd7`) round-trip a
+  resumption blob through a versioned schema (`'v': 1`,
+  base64url-encoded ticket / nonce / RMS / remembered TP, optional
+  SPKI hash, ISO-8601 `received_at`). The probe binary
+  [`bin/public_probe_0rtt.dart`](../bin/public_probe_0rtt.dart)
+  (`ea8fadd`, ~460 lines) drives a two-phase HARV/REPL flow:
+  HARV runs a vanilla 1-RTT handshake + h3 GET, polls TLS in the
+  response inbox loop so the post-handshake NewSessionTicket
+  reaches `_receivedTickets`, and persists the resulting state
+  to disk; REPL loads the JSON, stages a fresh `Connection` with
+  `TlsClientDriver(resumption:)`, computes the early-data secret
+  from `pskFromResumptionSecret` + `transcriptHash(CH)`,
+  reapplies the remembered transport parameters via
+  `TransportParams.decode(..., isServer: false)` +
+  `conn.applyPeerTransportParams` (otherwise
+  `H3Connection.sendRequest` trips `StreamLimit`), pre-stages the
+  H3 GET, and confirms 0-RTT emission by inspecting the first
+  byte (`(pkt[0] & 0xF0) == 0xD0`).
+
+## Previously recently closed
 
 - **WebTransport over HTTP/3 (draft-ietf-webtrans-http3).** Six
   installs landed end-to-end on top of the existing H3 stack:
