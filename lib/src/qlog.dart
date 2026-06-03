@@ -30,7 +30,7 @@ abstract class QlogEmitter {
   void emit(String name, Map<String, Object?> data);
 
   /// Flush any buffered output and release resources.
-  void close();
+  Future<void> close();
 }
 
 /// NDJSON (one event-object per line) sink — the simplest qlog format
@@ -63,9 +63,9 @@ class NdjsonQlogEmitter implements QlogEmitter {
   }
 
   @override
-  void close() {
-    _sink.flush();
-    _sink.close();
+  Future<void> close() async {
+    await _sink.flush();
+    await _sink.close();
   }
 }
 
@@ -86,7 +86,7 @@ class MemoryQlogEmitter implements QlogEmitter {
   }
 
   @override
-  void close() {}
+  Future<void> close() async {}
 }
 
 String _hex(Uint8List b) {
