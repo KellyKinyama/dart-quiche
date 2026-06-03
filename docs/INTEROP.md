@@ -65,8 +65,10 @@ codec, QPACK, h3, TLS key schedule (all three QUIC v1 cipher suites:
 version dispatch + v2 Retry integrity, and the full client-side
 0-RTT primitives (NewSessionTicket parse, resumption_master_secret
 derivation, PSK binder HMAC, ClientHello `pre_shared_key` /
-`early_data` emit, and long-header 0-RTT packet send). Current
-count: **419**.
+`early_data` emit, long-header 0-RTT packet send, and the
+server-side PSK acceptor that validates the binder and installs the
+early-data Open for in-process e2e 0-RTT decrypt). Current
+count: **425**.
 
 ## Remaining gaps
 
@@ -86,18 +88,16 @@ Ordered by impact:
    delivered). The probe now hex-dumps the failing datagram so the
    next reproduction will surface its wire content.
 
-3. **0-RTT replay (server-side acceptor).** Client-side primitives
-   are now complete: `SessionTicket.parse`,
-   `HandshakeSecrets.resumptionMasterSecret`,
-   `HandshakeSecrets.pskBinder`, `TlsClientDriver(resumption:)`
-   that emits a ClientHello with a valid `pre_shared_key` +
-   `early_data` offer, and `Connection.enableZeroRttSend` that
-   routes application-epoch sends through long-header 0-RTT
-   packets. What's still missing for actual replay is the
-   *server-side* PSK acceptance path (parse `pre_shared_key`,
-   verify binder, install early-data Open, accept `early_data`),
-   plus a public-Internet probe variant that retries with the
-   harvested ticket on a second connection.
+3. **0-RTT replay on the public Internet.** The full 0-RTT pipeline
+   is now wired end-to-end in-process (client emits the
+   `pre_shared_key` + `early_data` ClientHello and a long-header
+   0-RTT app-stream packet; server's `TlsServerDriver` validates
+   the binder against a `TicketStore` entry and installs the
+   early-data Open keyed on `client_early_traffic_secret`;
+   `zero_rtt_e2e_test` decrypts the 0-RTT packet under that Open).
+   What remains is a public-Internet probe variant that harvests a
+   real NewSessionTicket on one connection and replays it on a
+   second connection against the same origin.
 
 4. **Connection migration — active socket swap.** `PATH_CHALLENGE` /
    `PATH_RESPONSE` are wired in the connection state machine
@@ -107,17 +107,27 @@ Ordered by impact:
 
 ## Recently closed
 
-- **0-RTT client-side primitives (RFC 9001 §4.6 / RFC 8446 §4.2.11).**
-  Server-issued NewSessionTicket parse + `ResumptionState` bundling
-  (`b4186f7`, `afad2fb`); `HandshakeSecrets.pskBinder` and
+- **0-RTT end-to-end (RFC 9001 §4.6 / RFC 8446 §4.2.11).**
+  Client side: NewSessionTicket parse + `ResumptionState` bundling
+  (`b4186f7`, `afad2fb`); `HandshakeSecrets.pskBinder` /
   `resumptionBinderKey` (`cd97b73`); `TlsClientDriver(resumption:)`
   stages a CH carrying `pre_shared_key` (last extension) +
-  `early_data` with a binder HMAC computed over the truncated CH
+  `early_data` with a binder HMAC over the truncated CH
   (`59ca43a`); `Connection.enableZeroRttSend` installs the client
   early-data Seal and emits long-header 0-RTT (type 0x01) packets
-  on the application epoch (`c5ffd57`). Companion pure-dart-quic
-  commits: `20e8782` (`buildClientHelloWithPsk` + `PskOffer`).
-  Server-side PSK accept path remains.
+  on the application epoch (`c5ffd57`). Companion pure-dart-quic:
+  `20e8782` (`buildClientHelloWithPsk` + `PskOffer`,
+  `parse_tls_client_hello` now extracts `pre_shared_key` /
+  `early_data`, exposing `parsedPreSharedKey` +
+  `bindersListOffsetInBody`, commit `283066c`). Server side:
+  `TicketStore` + `Connection.enableZeroRttRecv` (`fb31702`),
+  `TlsServerDriver._maybeAcceptZeroRtt` which validates the first
+  PSK identity's binder against the wire CH prefix and installs
+  the early-data Open; the driver also stashes
+  `(alg, c_e_traffic)` so the post-server-Finished
+  `installApplicationKeys` reinstall does not clobber the 0-RTT
+  Open before the client transitions to 1-RTT (`203873f`).
+  `zero_rtt_e2e_test` exercises the full pipeline end-to-end.
 
 - **Anti-amplification (RFC 9000 §8.1).** Server now refuses to send
   more than 3× the bytes received from an unvalidated peer; address

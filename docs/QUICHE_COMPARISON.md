@@ -34,7 +34,7 @@ means partial / not wired into the public surface; ❌ means absent.
 | ECDSA-P256-SHA256 / RSA-PSS-RSAE-SHA256 verify | ✅ | ✅ |
 | Header protection (AES + ChaCha20 mask) | ✅ | ✅ |
 | Key update (1-RTT) | ✅ | ✅ (v1 + v2 labels) |
-| 0-RTT (early data) | ✅ | 🟡 client-side complete (NST parse, PSK binder, CH `pre_shared_key`+`early_data`, long-header 0-RTT send); server-side PSK acceptor pending |
+| 0-RTT (early data) | ✅ | ✅ client+server e2e (NST parse, PSK binder, CH `pre_shared_key`+`early_data`, long-header 0-RTT send, server-side binder validation + early-data Open install, in-process replay test green); public-Internet probe pending |
 | PKI chain validation against system trust store | ✅ via BoringSSL | ❌ leaf SAN + sig only |
 
 ## Transport
@@ -91,12 +91,12 @@ full matrix, ciphers, body sizes, and reproduction commands.
 
 ## Headline gaps to close next, in priority order
 
-1. **0-RTT session resumption.** Keys + `NEW_TOKEN` parsing already
-   exist; missing piece is persisting `{transport_params, resumption
-   secret, ALPN}` at close and replaying on the next Initial.
-2. **PKI chain validation.** Today: leaf SAN + signature only. Next:
+1. **PKI chain validation.** Today: leaf SAN + signature only. Next:
    Win32 `CertGetCertificateChain` FFI or a Dart-native chain walker
    against a bundled trust store.
-3. **qlog emission.** Drop-in observability parity with `quiche`.
-4. **BBRv2.** Single biggest throughput delta for lossy paths.
-5. **Extended CONNECT / WebTransport + h3 DATAGRAM framing.**
+2. **qlog emission.** Drop-in observability parity with `quiche`.
+3. **BBRv2.** Single biggest throughput delta for lossy paths.
+4. **Extended CONNECT / WebTransport + h3 DATAGRAM framing.**
+5. **Public-Internet 0-RTT probe.** Pipeline is green in-process;
+   need a probe variant that harvests a real NewSessionTicket on
+   one connection and replays it against the same origin.
