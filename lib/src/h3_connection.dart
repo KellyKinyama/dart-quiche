@@ -174,6 +174,24 @@ class H3Connection {
   late final int _localQEncId;
   late final int _localQDecId;
 
+  /// Next free local-initiated unidirectional stream id, advanced by
+  /// [allocLocalUniStreamId]. Starts past the three H3 control
+  /// streams ([_localCtrlId], [_localQEncId], [_localQDecId]). Used
+  /// by higher layers (WebTransport) that need to open their own
+  /// uni streams without colliding with H3's reserved ids.
+  late int _nextLocalUniId;
+
+  /// Allocate (and consume) the next local uni stream id. The
+  /// returned id is suitable for `conn.streamSend(id, ...)` to open
+  /// a fresh outbound unidirectional stream. The caller is
+  /// responsible for writing whatever stream-type prefix the higher
+  /// protocol requires (e.g. WebTransport's 0x54 + session id).
+  int allocLocalUniStreamId() {
+    final id = _nextLocalUniId;
+    _nextLocalUniId += 4;
+    return id;
+  }
+
   // Next bidi stream id we'll allocate when the application calls
   // [sendRequest]. Clients use 0, 4, 8, ...; servers use 1, 5, 9, ...
   int _nextBidiId;
@@ -224,6 +242,7 @@ class H3Connection {
     _localCtrlId = base;
     _localQEncId = base + 4;
     _localQDecId = base + 8;
+    _nextLocalUniId = base + 12;
 
     // Allow the peer to insert up to _ourQpackMaxCapacity bytes into
     // the dynamic table it ships to us via its encoder stream.

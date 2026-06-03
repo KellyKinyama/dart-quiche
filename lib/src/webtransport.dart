@@ -95,6 +95,54 @@ Uint8List encodeCloseSessionCapsule(int errorCode, [Uint8List? reason]) {
 Uint8List encodeDrainSessionCapsule() =>
     encodeCapsule(WtCapsuleType.drainSession, Uint8List(0));
 
+/// WebTransport unidirectional-stream type
+/// (draft-ietf-webtrans-http3 §4.2). Prefixes every WT uni stream
+/// to distinguish it from H3 control / QPACK / push streams.
+const int wtUniStreamType = 0x54;
+
+/// WebTransport bidirectional-stream frame type
+/// (draft-ietf-webtrans-http3 §4.2). Prefixes the first DATA on
+/// a WT-owned bidi stream.
+const int wtBidiStreamFrameType = 0x41;
+
+/// Encode the wire prefix of a WebTransport unidirectional stream:
+/// `varint(0x54) || varint(sessionId)`. The caller writes this as
+/// the first bytes of a freshly-opened QUIC uni stream, then writes
+/// the WT payload.
+Uint8List encodeWtUniStreamPrefix(int sessionId) {
+  final lnSession = varintLen(sessionId);
+  // varint(0x54) is 1 byte (since 0x54 < 0x40 is false → 2 bytes
+  // actually). 0x54 = 84 > 63 so it needs 2 bytes of varint.
+  final lnType = varintLen(wtUniStreamType);
+  final out = Uint8List(lnType + lnSession);
+  final b = Octets.withSlice(out);
+  b.putVarint(wtUniStreamType);
+  b.putVarint(sessionId);
+  return out;
+}
+
+/// Try to peel the WT uni stream prefix off the front of [buf].
+/// Returns `(sessionId, bytesConsumed)` on success, or null when
+/// [buf] does not yet hold the full `varint(0x54) || varint(sid)`
+/// prefix or when the type varint is not `wtUniStreamType`.
+(int sessionId, int consumed)? parseWtUniStreamPrefix(Uint8List buf) {
+  final b = Octets.withSlice(buf);
+  final int ty;
+  final int sid;
+  try {
+    ty = b.getVarint();
+  } on Object {
+    return null;
+  }
+  if (ty != wtUniStreamType) return null;
+  try {
+    sid = b.getVarint();
+  } on Object {
+    return null;
+  }
+  return (sid, b.off);
+}
+
 /// Try to peel a single capsule off the front of [buf]. Returns
 /// (capsule, bytesConsumed) on success, or null when [buf] does not
 /// yet contain a complete capsule (Type / Length / Value all
@@ -270,6 +318,77 @@ class WebTransportSession {
       out.add(parsed.$1);
       _capsuleBuf.removeRange(0, parsed.$2);
     }
+    return out;
+  }
+
+  /// Open a new outbound WebTransport unidirectional stream
+  /// (draft-ietf-webtrans-http3 §4.2). Allocates a fresh local uni
+  /// stream id via [H3Connection.allocLocalUniStreamId], writes the
+  /// wire prefix `varint(0x54) || varint(sessionStreamId)`, and
+  /// returns the new stream id. The caller appends payload bytes
+  /// with [sendUniStreamData].
+  int openUniStream() {
+    final id = h3.allocLocalUniStreamId();
+    h3.conn.streamSend(id, encodeWtUniStreamPrefix(streamId));
+    return id;
+  }
+
+  /// Append payload bytes to a previously [openUniStream]ed local
+  /// uni stream. Pass `fin = true` to half-close.
+  int sendUniStreamData(int uniStreamId, Uint8List data,
+      {bool fin = false}) {
+    return h3.conn.streamSend(uniStreamId, data, fin: fin);
+  }
+}
+
+/// Inbound WT unidirectional-stream framing helper. Stateful so
+/// callers don't have to remember whether the prefix has been seen
+/// across multiple `conn.streamRecv` calls.
+///
+/// The application creates one of these per inbound WT uni stream
+/// id, repeatedly feeds it the output of `conn.streamRecv` until
+/// [prefixReady], then dispatches [sessionId] to the right
+/// [WebTransportSession] and drains payload via [drainPayload].
+class WtUniStreamReader {
+  WtUniStreamReader();
+
+  final List<int> _buf = [];
+  int? _sessionId;
+  bool _finSeen = false;
+
+  /// True once the `varint(0x54) || varint(sessionId)` prefix has
+  /// been fully observed.
+  bool get prefixReady => _sessionId != null;
+
+  /// Session id parsed from the prefix; null until [prefixReady].
+  int? get sessionId => _sessionId;
+
+  /// True once a FIN has been observed on the underlying stream.
+  bool get fin => _finSeen;
+
+  /// Feed bytes from one `conn.streamRecv` call. Returns true once
+  /// [prefixReady] (so the caller can dispatch to the right
+  /// session). [streamFin] mirrors the QUIC FIN flag.
+  bool feed(Uint8List bytes, {bool streamFin = false}) {
+    _buf.addAll(bytes);
+    if (streamFin) _finSeen = true;
+    if (_sessionId == null) {
+      final view = Uint8List.fromList(_buf);
+      final parsed = parseWtUniStreamPrefix(view);
+      if (parsed != null) {
+        _sessionId = parsed.$1;
+        _buf.removeRange(0, parsed.$2);
+      }
+    }
+    return _sessionId != null;
+  }
+
+  /// Drain any payload bytes that have arrived after the prefix
+  /// was complete. Returns null until [prefixReady].
+  Uint8List? drainPayload() {
+    if (_sessionId == null) return null;
+    final out = Uint8List.fromList(_buf);
+    _buf.clear();
     return out;
   }
 }
