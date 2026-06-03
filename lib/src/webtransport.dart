@@ -143,6 +143,45 @@ Uint8List encodeWtUniStreamPrefix(int sessionId) {
   return (sid, b.off);
 }
 
+/// Encode the wire prefix of a WebTransport bidirectional stream:
+/// `varint(0x41) || varint(sessionId)`. The caller writes this as
+/// the very first bytes of a freshly-opened QUIC bidi stream, then
+/// writes the WT payload. The 0x41 here is the
+/// `WEBTRANSPORT_STREAM` frame type, not a stream-type id —
+/// draft-ietf-webtrans-http3 §4.2 reuses the H3 frame-type space
+/// for the bidi case.
+Uint8List encodeWtBidiStreamPrefix(int sessionId) {
+  final lnType = varintLen(wtBidiStreamFrameType);
+  final lnSid = varintLen(sessionId);
+  final out = Uint8List(lnType + lnSid);
+  final b = Octets.withSlice(out);
+  b.putVarint(wtBidiStreamFrameType);
+  b.putVarint(sessionId);
+  return out;
+}
+
+/// Try to peel a WT bidi stream prefix off the front of [buf].
+/// Returns `(sessionId, bytesConsumed)` on success, or null when
+/// [buf] does not yet hold the full `varint(0x41) || varint(sid)`
+/// prefix or when the type varint is not `wtBidiStreamFrameType`.
+(int sessionId, int consumed)? parseWtBidiStreamPrefix(Uint8List buf) {
+  final b = Octets.withSlice(buf);
+  final int ty;
+  final int sid;
+  try {
+    ty = b.getVarint();
+  } on Object {
+    return null;
+  }
+  if (ty != wtBidiStreamFrameType) return null;
+  try {
+    sid = b.getVarint();
+  } on Object {
+    return null;
+  }
+  return (sid, b.off);
+}
+
 /// Try to peel a single capsule off the front of [buf]. Returns
 /// (capsule, bytesConsumed) on success, or null when [buf] does not
 /// yet contain a complete capsule (Type / Length / Value all
@@ -339,6 +378,27 @@ class WebTransportSession {
       {bool fin = false}) {
     return h3.conn.streamSend(uniStreamId, data, fin: fin);
   }
+
+  /// Open a new outbound WebTransport bidirectional stream
+  /// (draft-ietf-webtrans-http3 §4.2). Allocates the next reserved
+  /// local bidi id via [H3Connection.allocLocalWtBidiStreamId] (a
+  /// range that sits past the H3 request stream space so the H3
+  /// demux will not parse it as a request), writes the
+  /// `WEBTRANSPORT_STREAM` frame prefix
+  /// `varint(0x41) || varint(sessionStreamId)`, and returns the
+  /// new stream id.
+  int openBidiStream() {
+    final id = h3.allocLocalWtBidiStreamId();
+    h3.conn.streamSend(id, encodeWtBidiStreamPrefix(streamId));
+    return id;
+  }
+
+  /// Append payload bytes to a previously [openBidiStream]ed local
+  /// bidi stream. Pass `fin = true` to half-close the send side.
+  int sendBidiStreamData(int bidiStreamId, Uint8List data,
+      {bool fin = false}) {
+    return h3.conn.streamSend(bidiStreamId, data, fin: fin);
+  }
 }
 
 /// Inbound WT unidirectional-stream framing helper. Stateful so
@@ -375,6 +435,54 @@ class WtUniStreamReader {
     if (_sessionId == null) {
       final view = Uint8List.fromList(_buf);
       final parsed = parseWtUniStreamPrefix(view);
+      if (parsed != null) {
+        _sessionId = parsed.$1;
+        _buf.removeRange(0, parsed.$2);
+      }
+    }
+    return _sessionId != null;
+  }
+
+  /// Drain any payload bytes that have arrived after the prefix
+  /// was complete. Returns null until [prefixReady].
+  Uint8List? drainPayload() {
+    if (_sessionId == null) return null;
+    final out = Uint8List.fromList(_buf);
+    _buf.clear();
+    return out;
+  }
+}
+
+/// Inbound WT bidirectional-stream framing helper. Mirrors
+/// [WtUniStreamReader] but expects the `WEBTRANSPORT_STREAM` frame
+/// prefix `varint(0x41) || varint(sessionId)` instead of the
+/// 0x54 stream-type prefix. Used on both client- and server-side
+/// for inbound WT bidi streams owned by a [WebTransportSession].
+class WtBidiStreamReader {
+  WtBidiStreamReader();
+
+  final List<int> _buf = [];
+  int? _sessionId;
+  bool _finSeen = false;
+
+  /// True once the `varint(0x41) || varint(sessionId)` prefix has
+  /// been fully observed.
+  bool get prefixReady => _sessionId != null;
+
+  /// Session id parsed from the prefix; null until [prefixReady].
+  int? get sessionId => _sessionId;
+
+  /// True once a FIN has been observed on the underlying stream.
+  bool get fin => _finSeen;
+
+  /// Feed bytes from one `conn.streamRecv` call. Returns true once
+  /// [prefixReady]. [streamFin] mirrors the QUIC FIN flag.
+  bool feed(Uint8List bytes, {bool streamFin = false}) {
+    _buf.addAll(bytes);
+    if (streamFin) _finSeen = true;
+    if (_sessionId == null) {
+      final view = Uint8List.fromList(_buf);
+      final parsed = parseWtBidiStreamPrefix(view);
       if (parsed != null) {
         _sessionId = parsed.$1;
         _buf.removeRange(0, parsed.$2);

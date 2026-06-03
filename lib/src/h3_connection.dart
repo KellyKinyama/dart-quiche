@@ -192,6 +192,24 @@ class H3Connection {
     return id;
   }
 
+  /// Next free local-initiated bidi stream id reserved for higher
+  /// layers that open their own bidis outside the HTTP/3 request
+  /// stream space (currently: WebTransport `WEBTRANSPORT_STREAM`
+  /// frames per draft-ietf-webtrans-http3 §4.2). Initialised in the
+  /// constructor to base + 16 so it sits past both the H3 demux's
+  /// probe range (ids 0..12) and the first four request-stream
+  /// slots (0, 4, 8, 12) the application can hand to [sendRequest].
+  late int _nextLocalWtBidiId;
+
+  /// Allocate (and consume) the next local bidi stream id for a
+  /// WebTransport bidirectional stream. Returns an id that does not
+  /// overlap with any H3 request stream the demux will probe.
+  int allocLocalWtBidiStreamId() {
+    final id = _nextLocalWtBidiId;
+    _nextLocalWtBidiId += 4;
+    return id;
+  }
+
   // Next bidi stream id we'll allocate when the application calls
   // [sendRequest]. Clients use 0, 4, 8, ...; servers use 1, 5, 9, ...
   int _nextBidiId;
@@ -243,6 +261,8 @@ class H3Connection {
     _localQEncId = base + 4;
     _localQDecId = base + 8;
     _nextLocalUniId = base + 12;
+    final bidiBase = isServer ? 0x1 : 0x0;
+    _nextLocalWtBidiId = bidiBase + 16;
 
     // Allow the peer to insert up to _ourQpackMaxCapacity bytes into
     // the dynamic table it ships to us via its encoder stream.
