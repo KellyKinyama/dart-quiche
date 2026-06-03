@@ -1319,6 +1319,8 @@ class Connection {
       now: DateTime.now(),
     );
 
+    _emitMetricsUpdatedIfChanged();
+
     _bytesSent += totalLen;
     return Uint8List.fromList(Uint8List.sublistView(buf, 0, totalLen));
   }
@@ -1399,6 +1401,59 @@ class Connection {
       case Epoch.application:
         return 'application_data';
     }
+  }
+
+  // Last `recovery:metrics_updated` snapshot — used to emit qlog
+  // events only when at least one tracked metric has actually
+  // changed, so high-frequency send/ack churn doesn't flood the trace.
+  int? _qlogLastSmoothedRttUs;
+  int? _qlogLastLatestRttUs;
+  int? _qlogLastRttVarUs;
+  int? _qlogLastMinRttUs;
+  int? _qlogLastCwnd;
+  int? _qlogLastBif;
+
+  void _emitMetricsUpdatedIfChanged() {
+    if (qlog == null) return;
+    final r = recovery;
+    final sRtt = r.rttStats.smoothedRtt;
+    final lRtt = r.rttStats.latestRtt;
+    final rVar = r.rttStats.rttvar;
+    final mRtt = r.rttStats.minRtt();
+    final cwnd = r.cwnd();
+    final bif = r.bytesInFlight();
+
+    final sUs = sRtt.inMicroseconds;
+    final lUs = lRtt.inMicroseconds;
+    final vUs = rVar.inMicroseconds;
+    final mUs = mRtt?.inMicroseconds;
+
+    if (sUs == _qlogLastSmoothedRttUs &&
+        lUs == _qlogLastLatestRttUs &&
+        vUs == _qlogLastRttVarUs &&
+        mUs == _qlogLastMinRttUs &&
+        cwnd == _qlogLastCwnd &&
+        bif == _qlogLastBif) {
+      return;
+    }
+    _qlogLastSmoothedRttUs = sUs;
+    _qlogLastLatestRttUs = lUs;
+    _qlogLastRttVarUs = vUs;
+    _qlogLastMinRttUs = mUs;
+    _qlogLastCwnd = cwnd;
+    _qlogLastBif = bif;
+
+    qlog!.emit(
+      'recovery:metrics_updated',
+      metricsUpdatedData(
+        minRtt: mRtt,
+        smoothedRtt: sRtt,
+        latestRtt: lRtt > Duration.zero ? lRtt : null,
+        rttVariance: rVar,
+        congestionWindow: cwnd,
+        bytesInFlight: bif,
+      ),
+    );
   }
 
   /// Like [_packetTypeFor] but consults [_zeroRttSendActive] so that
@@ -1659,6 +1714,7 @@ class Connection {
       handshakeStatus: _handshakeStatus(),
       now: now,
     );
+    _emitMetricsUpdatedIfChanged();
   }
 
   /// Configure our advertised `max_idle_timeout` (RFC 9000 §18.2)
@@ -2142,6 +2198,7 @@ class Connection {
         }
       }
     }
+    _emitMetricsUpdatedIfChanged();
   }
 }
 

@@ -47,8 +47,10 @@ void main() {
     final pkt = clientConn.send(Epoch.initial);
     expect(pkt, isNotNull);
 
-    expect(qlog.events, hasLength(1));
-    final ev = qlog.events.single;
+    expect(qlog.events, hasLength(greaterThanOrEqualTo(1)));
+    final ev = qlog.events.firstWhere(
+      (e) => e['name'] == 'quic:packet_sent',
+    );
     expect(ev['name'], 'quic:packet_sent');
     final data = ev['data'] as Map<String, Object?>;
     final header = data['header'] as Map<String, Object?>;

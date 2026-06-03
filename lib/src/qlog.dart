@@ -282,3 +282,28 @@ Map<String, Object?> qlogFrame(Frame f) {
   }
   return {'frame_type': 'unknown'};
 }
+
+/// Build a `recovery:metrics_updated` event `data` map per the qlog
+/// QUIC schema (cloudflare/quiche `qlog::events::quic::MetricsUpdated`).
+/// RTTs are reported as fractional milliseconds. All fields are
+/// optional — pass only what you have available.
+Map<String, Object?> metricsUpdatedData({
+  Duration? minRtt,
+  Duration? smoothedRtt,
+  Duration? latestRtt,
+  Duration? rttVariance,
+  int? congestionWindow,
+  int? bytesInFlight,
+  int? pacingRate,
+}) {
+  double ms(Duration d) => d.inMicroseconds / 1000.0;
+  return {
+    if (minRtt != null) 'min_rtt': ms(minRtt),
+    if (smoothedRtt != null) 'smoothed_rtt': ms(smoothedRtt),
+    if (latestRtt != null) 'latest_rtt': ms(latestRtt),
+    if (rttVariance != null) 'rtt_variance': ms(rttVariance),
+    if (congestionWindow != null) 'congestion_window': congestionWindow,
+    if (bytesInFlight != null) 'bytes_in_flight': bytesInFlight,
+    if (pacingRate != null) 'pacing_rate': pacingRate,
+  };
+}
