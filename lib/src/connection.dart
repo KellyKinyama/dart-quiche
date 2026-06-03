@@ -1476,6 +1476,16 @@ class Connection {
     return out;
   }
 
+  /// Convenience over [sendDatagram] using the canonical RFC 9000
+  /// §12.2 epoch ordering `[initial, handshake, application]`. Returns
+  /// the next outbound coalesced UDP datagram, or `null` when nothing
+  /// is pending across any epoch. Integrators that just want to pump
+  /// `while ((d = conn.sendNext()) != null) socket.send(d, ...)` should
+  /// prefer this over the per-epoch [send] loop.
+  Uint8List? sendNext() => sendDatagram(
+        const [Epoch.initial, Epoch.handshake, Epoch.application],
+      );
+
   static Epoch _epochFor(PacketType t) {    switch (t) {
       case PacketType.initial:
         return Epoch.initial;
@@ -2220,6 +2230,19 @@ class Connection {
       isApp: isApp,
       frameType: frameType,
       reason: reason ?? Uint8List(0),
+    );
+  }
+
+  /// Convenience wrapper around [close] for the common
+  /// application-protocol shutdown case (RFC 9000 §10.2.1
+  /// CONNECTION_CLOSE of type 0x1d). Encodes [reason] as UTF-8.
+  void closeApplication({int appErrorCode = 0, String? reason}) {
+    close(
+      errorCode: appErrorCode,
+      isApp: true,
+      reason: reason == null
+          ? null
+          : Uint8List.fromList(reason.codeUnits),
     );
   }
 

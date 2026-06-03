@@ -36,6 +36,9 @@ const int _hsEncryptedExtensions = 0x08;
 const int _hsCertificate = 0x0b;
 const int _hsCertificateVerify = 0x0f;
 
+// TLS 1.3 extension types relevant to ALPN extraction (RFC 7301 §3.1).
+const int _extAlpn = 0x0010;
+
 // SignatureScheme values (RFC 8446 §4.2.3).
 const int _sigSchemeEcdsaP256Sha256 = 0x0403;
 const int _sigSchemeRsaPssRsaeSha256 = 0x0804;
@@ -53,6 +56,13 @@ class TlsServerDriver {
   /// — echoed inside `original_destination_connection_id` transport
   /// parameter in EncryptedExtensions.
   final Uint8List originalDcid;
+
+  /// ALPN protocol the server advertises in EncryptedExtensions
+  /// (RFC 7301 §3.2). Defaults to `'h3'`. The server does not yet
+  /// negotiate against the client's offered list — it simply asserts
+  /// this string back to the peer. Use a non-`'h3'` value (e.g.
+  /// `'xmpp-client'` per XEP-0467) for non-HTTP/3 deployments.
+  final String alpn;
 
   bool _processedCh = false;
   bool _sentFlight = false;
@@ -77,9 +87,15 @@ class TlsServerDriver {
     required this.conn,
     required this.serverCert,
     required this.originalDcid,
+    this.alpn = 'h3',
     TlsServerHandshake? tls,
     this.ticketStore,
   }) : tls = tls ?? TlsServerHandshake();
+
+  /// The negotiated ALPN once the server has staged its handshake
+  /// flight (EncryptedExtensions has been sent). Returns the configured
+  /// [alpn] string after [flightStaged] becomes true, otherwise null.
+  String? get negotiatedAlpn => _sentFlight ? alpn : null;
 
   /// True once the server has finished installing handshake-traffic +
   /// application-traffic keys.
@@ -168,6 +184,7 @@ class TlsServerDriver {
         serverCert: serverCert,
         originalDestinationCid: originalDcid,
         initialSourceCid: conn.localCid,
+        alpn: alpn,
       );
       final flightThroughCv = Uint8List.fromList([
         ...flight.encryptedExtensions,
@@ -368,6 +385,14 @@ class TlsClientDriver {
   /// `false`.
   final bool verifyHostname;
 
+  /// ALPN protocols offered in the ClientHello, in preference order.
+  /// Defaults to `['h3']`. After the server's EncryptedExtensions has
+  /// been processed, [negotiatedAlpn] holds the single protocol the
+  /// server picked (or null if the server omitted ALPN).
+  final List<String> alpns;
+
+  String? _negotiatedAlpn;
+
   Uint8List? _chBytes;
   Uint8List? _shBytes;
   Uint8List? _sharedSecret;
@@ -408,12 +433,21 @@ class TlsClientDriver {
     required this.conn,
     required this.hostname,
     this.verifyHostname = true,
+    this.alpns = const ['h3'],
     this.resumption,
     TlsClientHandshake? tls,
   }) : tls = tls ?? TlsClientHandshake(localCid: conn.localCid);
 
   /// True once the client has installed handshake + application keys.
   bool get keysInstalled => _processedSh;
+
+  /// The ALPN protocol the server selected, surfaced once the
+  /// EncryptedExtensions message has been parsed. Null until then, or
+  /// if the server's EE did not include the ALPN extension (RFC 7301
+  /// §3.2). Callers that require a specific ALPN should compare this
+  /// against their expected protocol and tear the connection down on
+  /// mismatch.
+  String? get negotiatedAlpn => _negotiatedAlpn;
 
   /// True once the client has staged its Finished on the Handshake
   /// CRYPTO send stream.
@@ -478,6 +512,7 @@ class TlsClientDriver {
     if (_started) return;
     final ch = tls.buildClientHello(
       hostname: hostname,
+      alpns: alpns,
       resumption: resumption,
     );
     _chBytes = ch;
@@ -608,6 +643,11 @@ class TlsClientDriver {
             final peerTp = TransportParams.decode(peerTpRaw, false);
             conn.applyPeerTransportParams(peerTp);
           }
+
+          // RFC 7301 §3.2: capture the single ALPN protocol the
+          // server selected, if any. Exposed via [negotiatedAlpn] so
+          // callers can compare it against [alpns] and reject mismatch.
+          _negotiatedAlpn = _extractAlpnFromEncryptedExtensions(flightBytes);
 
           // RFC 8446 §4.4.4 — verify the server Finished against
           // expected = HMAC(s_hs_traffic, transcript-hash(CH..CV)),
@@ -821,6 +861,42 @@ Uint8List? _extractPeerTpFromEncryptedExtensions(Uint8List flightBytes) {
     if (off + extLen > end) return null;
     if (extType == 0x0039) {
       return Uint8List.fromList(Uint8List.sublistView(body, off, off + extLen));
+    }
+    off += extLen;
+  }
+  return null;
+}
+
+/// Pulls the single ALPN protocol the server selected from the
+/// `application_layer_protocol_negotiation` extension (id 0x0010,
+/// RFC 7301 §3.1) of the EncryptedExtensions message that prefixes
+/// [flightBytes]. Returns null if no EE / no ALPN ext / empty
+/// protocol list is present.
+String? _extractAlpnFromEncryptedExtensions(Uint8List flightBytes) {
+  final msgs = _splitHandshakeMessages(flightBytes);
+  if (msgs.isEmpty || msgs[0].type != _hsEncryptedExtensions) return null;
+  final body = msgs[0].body;
+  if (body.length < 2) return null;
+  final extsLen = (body[0] << 8) | body[1];
+  if (extsLen + 2 > body.length) return null;
+  var off = 2;
+  final end = off + extsLen;
+  while (off + 4 <= end) {
+    final extType = (body[off] << 8) | body[off + 1];
+    final extLen = (body[off + 2] << 8) | body[off + 3];
+    off += 4;
+    if (off + extLen > end) return null;
+    if (extType == _extAlpn) {
+      // ProtocolNameList: uint16 list_length, then opaque name<1..255>+.
+      if (extLen < 3) return null;
+      final listLen = (body[off] << 8) | body[off + 1];
+      if (listLen + 2 > extLen) return null;
+      final nameLen = body[off + 2];
+      if (nameLen == 0 || nameLen + 3 > extLen) return null;
+      final nameStart = off + 3;
+      return String.fromCharCodes(
+        Uint8List.sublistView(body, nameStart, nameStart + nameLen),
+      );
     }
     off += extLen;
   }
