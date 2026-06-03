@@ -25,6 +25,7 @@ import 'octets.dart';
 import 'packet.dart';
 import 'packet_type.dart';
 import 'pkt_num_space_map.dart';
+import 'pmtud.dart';
 import 'range_buf.dart';
 import 'recovery_config.dart';
 import 'sent.dart';
@@ -337,6 +338,28 @@ class Connection {
   /// resend logic if needed.
   final LegacyRecovery recovery;
 
+  /// RFC 8899 / RFC 9000 §14.3 Path MTU Discovery state. Probes are
+  /// emitted on the 1-RTT application epoch only — never on Initial,
+  /// Handshake, or 0-RTT — and only on packets that already carry
+  /// ack-eliciting content (so the probe is itself ack-eliciting via
+  /// PADDING + the existing payload, eliciting an ACK that confirms
+  /// the probed MTU). Constructor parameter `maxSendUdpPayload` caps
+  /// the upper bound; defaults to 1500.
+  final Pmtud pmtud;
+
+  /// Packet number we used for an in-flight DPLPMTUD probe, plus the
+  /// padded size we probed at. Cleared in [_onAckFrame] once we know
+  /// whether the probe was acked (success) or skipped past (failure).
+  int? _pmtudProbePn;
+  int _pmtudProbeSize = 0;
+
+  /// RFC 8899: opt-in DPLPMTUD. Default false to preserve the
+  /// per-packet payload budget existing tests rely on. Set via
+  /// constructor (`discoverPmtu: true`) or by flipping the flag
+  /// after construction. When false, [send] never pads probes even
+  /// if [pmtud.shouldProbe] would otherwise return true.
+  bool discoverPmtu;
+
   Connection({
     required this.localCid,
     required this.isServer,
@@ -344,10 +367,14 @@ class Connection {
     this.peerCid,
     PktNumSpaceMap? spaces,
     LegacyRecovery? recovery,
+    Pmtud? pmtud,
+    int maxSendUdpPayload = 1500,
+    this.discoverPmtu = false,
     Uint8List? initialToken,
     this.qlog,
   }) : spaces = spaces ?? PktNumSpaceMap(),
        recovery = recovery ?? LegacyRecovery.fromConfig(const RecoveryConfig()),
+       pmtud = pmtud ?? Pmtud(maxSendUdpPayload),
        _initialToken = initialToken == null
            ? null
            : Uint8List.fromList(initialToken),
@@ -1192,11 +1219,37 @@ class Connection {
     final pn = (space.largestTxPktNum ?? -1) + 1;
     const pnLen = 4;
 
+    // RFC 8899 §3: send a DPLPMTUD probe by padding an ack-eliciting
+    // 1-RTT packet up to the candidate size. Probes ride only on the
+    // post-handshake short-header epoch — never on Initial/Handshake
+    // (loss there would derail the handshake) nor 0-RTT (the server
+    // may not yet have validated the path).
+    PaddingFrame? pmtudPadFrame;
+    PingFrame? pmtudPingFrame;
+    var pmtudProbeArmed = false;
+    if (pktType == PacketType.short &&
+        discoverPmtu &&
+        !_zeroRttSendActive &&
+        pmtud.shouldProbe() &&
+        _pmtudProbePn == null) {
+      // Need the probe itself to be ack-eliciting. If the packet has
+      // no ack-eliciting payload yet, attach a PING.
+      final alreadyEliciting = cryptoFrame != null ||
+          streamFrames.isNotEmpty ||
+          hdFrame != null ||
+          pingFrame != null;
+      if (!alreadyEliciting) {
+        pmtudPingFrame = const PingFrame();
+      }
+      pmtudProbeArmed = true;
+    }
+
     var payloadLen = 0;
     if (ackFrame != null) payloadLen += ackFrame.wireLen();
     if (cryptoFrame != null) payloadLen += cryptoFrame.wireLen();
     if (hdFrame != null) payloadLen += hdFrame.wireLen();
     if (pingFrame != null) payloadLen += pingFrame.wireLen();
+    if (pmtudPingFrame != null) payloadLen += pmtudPingFrame.wireLen();
     for (final f in ctrlFrames) {
       payloadLen += f.wireLen();
     }
@@ -1208,6 +1261,23 @@ class Connection {
     }
     for (final f in streamFrames) {
       payloadLen += f.wireLen();
+    }
+
+    if (pmtudProbeArmed) {
+      // Short-header on-wire size at this point: 1 (first byte) + dcid
+      // + pnLen + payloadLen + 16 (AEAD tag). Pad with PADDING frames
+      // to reach the candidate probe size.
+      final currentSize = 1 + dcid.length + pnLen + payloadLen + 16;
+      final probeSize = pmtud.getProbeSize();
+      final padNeeded = probeSize - currentSize;
+      if (padNeeded > 0) {
+        pmtudPadFrame = PaddingFrame(padNeeded);
+        payloadLen += padNeeded;
+      } else {
+        // Already at/over the probe size — nothing to do this round.
+        pmtudProbeArmed = false;
+        pmtudPingFrame = null;
+      }
     }
 
     final initialToken = pktType == PacketType.initial
@@ -1240,6 +1310,7 @@ class Connection {
     if (cryptoFrame != null) cryptoFrame.toBytes(w);
     if (hdFrame != null) hdFrame.toBytes(w);
     if (pingFrame != null) pingFrame.toBytes(w);
+    if (pmtudPingFrame != null) pmtudPingFrame.toBytes(w);
     for (final f in ctrlFrames) {
       f.toBytes(w);
     }
@@ -1252,6 +1323,7 @@ class Connection {
     for (final f in streamFrames) {
       f.toBytes(w);
     }
+    if (pmtudPadFrame != null) pmtudPadFrame.toBytes(w);
 
     final totalLen = encryptPkt(
       Octets.withSlice(buf),
@@ -1271,10 +1343,12 @@ class Connection {
         if (cryptoFrame != null) qlogFrame(cryptoFrame),
         if (hdFrame != null) qlogFrame(hdFrame),
         if (pingFrame != null) qlogFrame(pingFrame),
+        if (pmtudPingFrame != null) qlogFrame(pmtudPingFrame),
         for (final f in ctrlFrames) qlogFrame(f),
         for (final f in fcFrames) qlogFrame(f),
         for (final f in dgramFrames) qlogFrame(f),
         for (final f in streamFrames) qlogFrame(f),
+        if (pmtudPadFrame != null) qlogFrame(pmtudPadFrame),
       ];
       qlog!.emit(
         'quic:packet_sent',
@@ -1298,11 +1372,18 @@ class Connection {
     // (RFC 9002 §2 — non-ack-eliciting).
     final trackedFrames = <Frame>[?cryptoFrame, ...streamFrames, ?hdFrame];
     if (hdFrame != null) _handshakeDoneSent = true;
-    final ackEliciting = trackedFrames.isNotEmpty || pingFrame != null;
+    final ackEliciting = trackedFrames.isNotEmpty ||
+        pingFrame != null ||
+        pmtudPingFrame != null;
     if (ackEliciting) {
       // Sending an ack-eliciting packet also resets the idle timer
       // (RFC 9000 §10.1.1).
       _lastActivity = DateTime.now();
+    }
+    if (pmtudProbeArmed) {
+      _pmtudProbePn = pn;
+      _pmtudProbeSize = totalLen;
+      pmtud.setInFlight(true);
     }
     recovery.onPacketSent(
       pkt: Sent(
@@ -1313,6 +1394,7 @@ class Connection {
         ackEliciting: ackEliciting,
         inFlight: ackEliciting,
         hasData: streamFrames.isNotEmpty || cryptoFrame != null,
+        isPmtudProbe: pmtudProbeArmed,
       ),
       epoch: epoch,
       handshakeStatus: _handshakeStatus(),
@@ -2184,6 +2266,24 @@ class Connection {
       handshakeStatus: _handshakeStatus(),
       now: DateTime.now(),
     );
+
+    // RFC 8899 §4.6 / RFC 9000 §14.3: classify any in-flight DPLPMTUD
+    // probe on the application epoch. If its pn is in the ack ranges
+    // the probed size succeeded; if a later pn was acked but the
+    // probe pn wasn't, treat it as lost.
+    final probePn = _pmtudProbePn;
+    if (probePn != null && epoch == Epoch.application) {
+      final largest = ack.ranges.largest;
+      if (ack.ranges.contains(probePn)) {
+        pmtud.successfulProbe(_pmtudProbeSize);
+        _pmtudProbePn = null;
+        _pmtudProbeSize = 0;
+      } else if (largest != null && largest >= probePn + 3) {
+        pmtud.failedProbe(_pmtudProbeSize);
+        _pmtudProbePn = null;
+        _pmtudProbeSize = 0;
+      }
+    }
 
     final cc = spaces.crypto(epoch);
     while (true) {
