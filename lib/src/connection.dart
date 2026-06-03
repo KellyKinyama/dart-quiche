@@ -26,6 +26,7 @@ import 'packet.dart';
 import 'packet_type.dart';
 import 'pkt_num_space_map.dart';
 import 'pmtud.dart';
+import 'pacer.dart';
 import 'range_buf.dart';
 import 'recovery_config.dart';
 import 'sent.dart';
@@ -347,6 +348,17 @@ class Connection {
   /// the upper bound; defaults to 1500.
   final Pmtud pmtud;
 
+  /// RFC 9002 §7.7 token-bucket pacer. Defaults to unlimited rate so
+  /// existing call sites behave exactly as before; embedders that
+  /// want congestion-controlled pacing call `conn.pacer.setRate(...)`
+  /// (typically driven from BBR's pacing rate or a simple
+  /// `cwnd / srtt` estimate from [recovery]). [send] debits the
+  /// bucket on every successful packet emission via `pacer.onSent`,
+  /// so the only thing application loops need to do is consult
+  /// `pacer.untilReady(estimatedNextPktSize, now)` before pulling
+  /// the next datagram.
+  final Pacer pacer;
+
   /// Packet number we used for an in-flight DPLPMTUD probe, plus the
   /// padded size we probed at. Cleared in [_onAckFrame] once we know
   /// whether the probe was acked (success) or skipped past (failure).
@@ -368,6 +380,7 @@ class Connection {
     PktNumSpaceMap? spaces,
     LegacyRecovery? recovery,
     Pmtud? pmtud,
+    Pacer? pacer,
     int maxSendUdpPayload = 1500,
     this.discoverPmtu = false,
     Uint8List? initialToken,
@@ -375,6 +388,7 @@ class Connection {
   }) : spaces = spaces ?? PktNumSpaceMap(),
        recovery = recovery ?? LegacyRecovery.fromConfig(const RecoveryConfig()),
        pmtud = pmtud ?? Pmtud(maxSendUdpPayload),
+       pacer = pacer ?? Pacer(),
        _initialToken = initialToken == null
            ? null
            : Uint8List.fromList(initialToken),
@@ -1404,6 +1418,7 @@ class Connection {
     _emitMetricsUpdatedIfChanged();
 
     _bytesSent += totalLen;
+    pacer.onSent(totalLen, DateTime.now());
     return Uint8List.fromList(Uint8List.sublistView(buf, 0, totalLen));
   }
 
@@ -2230,6 +2245,7 @@ class Connection {
     );
     space.onPacketSent(pn);
     _bytesSent += totalLen;
+    pacer.onSent(totalLen, DateTime.now());
     return Uint8List.fromList(Uint8List.sublistView(buf, 0, totalLen));
   }
 

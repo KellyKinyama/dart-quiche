@@ -34,6 +34,7 @@ export 'src/minmax.dart';
 export 'src/pkt_num_space.dart';
 export 'src/pkt_num_space_map.dart';
 export 'src/pmtud.dart';
+export 'src/pacer.dart';
 export 'src/prr.dart';
 export 'src/qpack.dart';
 export 'src/qlog.dart';
