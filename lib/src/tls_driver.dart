@@ -21,6 +21,7 @@ import 'cert_utils.dart'
         verifyEcdsaP256,
         verifyRsaPssSha256;
 import 'connection.dart';
+import 'crypto.dart' show Algorithm;
 import 'handshake_keys.dart';
 import 'packet_type.dart';
 import 'tls_handshake.dart';
@@ -278,6 +279,7 @@ class TlsClientDriver {
   Uint8List? _chBytes;
   Uint8List? _shBytes;
   Uint8List? _sharedSecret;
+  Algorithm? _negotiatedAlg;
   bool _started = false;
   bool _processedSh = false;
   bool _processedHandshakeFlight = false;
@@ -357,18 +359,26 @@ class TlsClientDriver {
           final bodyLen = (shBytes[1] << 16) | (shBytes[2] << 8) | shBytes[3];
           final body = Uint8List.sublistView(shBytes, 4, 4 + bodyLen);
           final sh = ServerHello.parse(QuicBuffer(data: body));
-          // pure_dart_quic's key schedule is pinned to
-          // TLS_AES_128_GCM_SHA256 (0x1301). If the peer picked
-          // anything else, the resulting Handshake/1-RTT AEAD keys
-          // would be wrong and every protected packet would silently
-          // fail to decrypt — surface it loudly here instead.
-          if (sh.cipherSuite != 0x1301) {
-            throw StateError(
-              'unsupported TLS cipher suite '
-              '0x${sh.cipherSuite.toRadixString(16)} '
-              '(only TLS_AES_128_GCM_SHA256 / 0x1301 is implemented)',
-            );
+          // pure_dart_quic's key schedule supports the two SHA-256-based
+          // TLS 1.3 suites (TLS_AES_128_GCM_SHA256 / 0x1301 and
+          // TLS_CHACHA20_POLY1305_SHA256 / 0x1303). TLS_AES_256_GCM_SHA384
+          // (0x1302) would need a SHA-384 transcript path — reject it for
+          // now rather than silently producing garbage keys.
+          final Algorithm negotiatedAlg;
+          switch (sh.cipherSuite) {
+            case 0x1301:
+              negotiatedAlg = Algorithm.aes128Gcm;
+            case 0x1303:
+              negotiatedAlg = Algorithm.chacha20Poly1305;
+            default:
+              throw StateError(
+                'unsupported TLS cipher suite '
+                '0x${sh.cipherSuite.toRadixString(16)} '
+                '(only TLS_AES_128_GCM_SHA256 / 0x1301 and '
+                'TLS_CHACHA20_POLY1305_SHA256 / 0x1303 are implemented)',
+              );
           }
+          _negotiatedAlg = negotiatedAlg;
           final serverPub = sh.keyShareEntry!.pub;
 
           final shared = x25519ShareSecret(
@@ -383,6 +393,7 @@ class TlsClientDriver {
             sharedSecret: shared,
             transcriptHashAfterServerHello: transcriptAfterSh,
             transcriptHashAfterServerFinished: transcriptAfterSh,
+            alg: negotiatedAlg,
           );
           secrets = s;
           conn.spaces.installHandshakeKeys(s, isServer: false);
@@ -479,6 +490,7 @@ class TlsClientDriver {
             sharedSecret: _sharedSecret!,
             transcriptHashAfterServerHello: transcriptAfterShOnly,
             transcriptHashAfterServerFinished: transcriptAfterServerFinished,
+            alg: _negotiatedAlg!,
           );
           secrets = s2;
           conn.spaces.installApplicationKeys(s2, isServer: false);

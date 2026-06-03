@@ -101,12 +101,21 @@ class HandshakeSecrets {
   ///   — used to derive the handshake-traffic secrets.
   /// * [transcriptHashAfterServerFinished]: `H(CH || SH || EE || Cert ||
   ///   CV || Finished)` — used to derive the application-traffic secrets.
+  /// * [alg]: negotiated TLS 1.3 cipher suite's AEAD. Currently only
+  ///   SHA-256-based suites are supported ([Algorithm.aes128Gcm] /
+  ///   [Algorithm.chacha20Poly1305]); AES-256-GCM-SHA384 would require
+  ///   hashLen=48 plumbing throughout the schedule.
   factory HandshakeSecrets.derive({
     required Uint8List sharedSecret,
     required Uint8List transcriptHashAfterServerHello,
     required Uint8List transcriptHashAfterServerFinished,
+    Algorithm alg = Algorithm.aes128Gcm,
   }) {
-    const alg = Algorithm.aes128Gcm; // SHA-256
+    assert(
+      alg == Algorithm.aes128Gcm || alg == Algorithm.chacha20Poly1305,
+      'HandshakeSecrets currently only supports SHA-256 cipher suites '
+      '(TLS_AES_128_GCM_SHA256 / TLS_CHACHA20_POLY1305_SHA256)',
+    );
     final hashLen = 32;
     final zeros = Uint8List(hashLen);
 
