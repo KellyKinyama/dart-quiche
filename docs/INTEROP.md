@@ -37,7 +37,10 @@ What's exercised end-to-end on the wire:
 - TLS 1.3 ClientHello with SNI + ALPN `h3` + signature_algorithms `ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256` + `quic_transport_parameters`
 - TLS 1.3 ServerHello, EncryptedExtensions, Certificate, CertificateVerify (ECDSA-P256 and RSA-PSS-SHA256), Finished
 - Server-side SAN / wildcard hostname match against the requested SNI
-- AEAD: `TLS_AES_128_GCM_SHA256` (`0x1301`) with AES-128 header protection
+- AEAD: `TLS_AES_128_GCM_SHA256` (`0x1301`), `TLS_AES_256_GCM_SHA384`
+  (`0x1302`) and `TLS_CHACHA20_POLY1305_SHA256` (`0x1303`) all wired
+  end-to-end through the TLS 1.3 key schedule and offered in the
+  ClientHello (pure-dart-quic)
 - QPACK static-table compressed request headers, HEADERS + DATA + fin
 - Multi-packet server flights (up to 6 RX coalesced packets, ~6.6 KB)
 
@@ -54,9 +57,11 @@ Verified previously (see git log around `082b1f8` and earlier):
 dart test
 ```
 
-382 tests across the connection state machine, packet codec, frame
-codec, QPACK, h3, TLS key schedule (both `TLS_AES_128_GCM_SHA256` and
-`TLS_CHACHA20_POLY1305_SHA256`), and Retry / VN helpers.
+389 tests across the connection state machine, packet codec, frame
+codec, QPACK, h3, TLS key schedule (all three QUIC v1 cipher suites:
+`TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`,
+`TLS_CHACHA20_POLY1305_SHA256`), Retry / VN helpers, and the RFC 9000
+§8.1 server-side anti-amplification limit.
 
 ## Remaining gaps
 
@@ -67,30 +72,40 @@ Ordered by impact:
    not that the chain links to a trusted root. Mitigation: every
    public-Internet result above used a leaf whose key matched the
    ATS-presented chain, but a MITM with a self-signed leaf for the
-   same SNI would not be caught. Next step: Win32 `CertGetCertificateChain`
-   FFI (or Dart-native chain walker against a bundled trust store).
+   same SNI would not be caught. Next step: Win32
+   `CertGetCertificateChain` FFI (or Dart-native chain walker against
+   a bundled trust store).
 
-2. **AES-256-GCM-SHA384 (`0x1302`)** — SHA-384 transcript path is not
-   wired through `HandshakeSecrets.derive`. AES-128-GCM and
-   ChaCha20-Poly1305 (both SHA-256) are supported. No public server
-   in the matrix above prefers `0x1302` when offered alongside
-   `0x1301`, so this is low-priority.
-
-3. **Offer `TLS_CHACHA20_POLY1305_SHA256` in ClientHello.** The key
-   schedule and AEAD are implemented and unit-tested; only the
-   pure-dart-quic `ClientHello` cipherSuites list still needs `0x1303`
-   appended for a server to pick it.
-
-4. **Intermittent `BufferTooShort` on a post-response aioquic
+2. **Intermittent `BufferTooShort` on a post-response aioquic
    datagram.** The response itself completes (fin=true, full body
    delivered). The probe now hex-dumps the failing datagram so the
    next reproduction will surface its wire content.
 
-5. **0-RTT.** `Connection(initialToken:)` and `NEW_TOKEN` parsing /
+3. **0-RTT.** `Connection(initialToken:)` and `NEW_TOKEN` parsing /
    storage are already in place. Missing: persisting transport
    parameters + traffic secret + ALPN at session-close and replaying
    them on the next Initial.
 
-6. **Connection migration / path validation.** `PATH_CHALLENGE` /
+4. **Connection migration / path validation.** `PATH_CHALLENGE` /
    `PATH_RESPONSE` frames parse but the active-path swap logic is not
    wired.
+
+5. **QUIC v2 (RFC 9369).** Only QUIC v1 (`0x00000001`) is supported.
+   v2 would need `protocolVersionV2 = 0x6b3343cf`, a v2 Initial salt,
+   v2-specific HKDF labels (`quicv2 key/iv/hp`) and a v2 Retry
+   integrity key + nonce.
+
+## Recently closed
+
+- **Anti-amplification (RFC 9000 §8.1).** Server now refuses to send
+  more than 3× the bytes received from an unvalidated peer; address
+  is marked validated on the first decrypted Handshake-epoch packet
+  (or via `Connection.markAddressValidated()` for NEW_TOKEN flows).
+  See commit `b0e34c0`.
+- **`TLS_CHACHA20_POLY1305_SHA256` (`0x1303`)** offered in ClientHello
+  and accepted on the server pick path. Commit `c43b1c5` +
+  pure-dart-quic `ed23b40`.
+- **`TLS_AES_256_GCM_SHA384` (`0x1302`)** — full SHA-384 transcript
+  plumbing in `HandshakeSecrets`, accepted by `tls_driver`, offered
+  by pure-dart-quic's ClientHello. Commits `da6fff9` + pure-dart-quic
+  `b65a3b3`.
