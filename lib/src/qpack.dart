@@ -49,6 +49,20 @@ class QpackEncoder {
   final _DynamicTable _dyn = _DynamicTable();
   final List<int> _encoderStream = <int>[];
 
+  /// How many times each (name, value) pair has been encoded since
+  /// construction. Used by [encode] to decide whether to proactively
+  /// insert a pair into the dynamic table (RFC 9204 §2.2). Keys are
+  /// `String.fromCharCodes(name) || '\u0000' || String.fromCharCodes(value)`
+  /// — Dart `String` can hold arbitrary 0..255 code units, so this is
+  /// a bijective hash key over the underlying bytes.
+  final Map<String, int> _pairFreq = <String, int>{};
+
+  /// Minimum number of times a (name, value) pair must be seen before
+  /// [encode] proactively inserts it into the dynamic table. 2 means
+  /// "the second time we see the same pair, insert it"; subsequent
+  /// blocks then encode it as a one-byte dynamic-indexed reference.
+  int insertionThreshold = 2;
+
   QpackEncoder();
 
   /// Current capacity of our local dynamic table in octets.
@@ -125,6 +139,33 @@ class QpackEncoder {
   /// number of bytes written. Dynamic-table entries already inserted
   /// via [insertLiteral] are referenced where they match.
   int encode(List<H3Header> headers, Uint8List out) {
+    // Proactive dynamic-table insertion (RFC 9204 §2.2). For every
+    // header that:
+    //   * has no full match in the static table (static-covered pairs
+    //     already encode in 1-2 bytes; inserting them is pure waste),
+    //   * is not already present in the dynamic table,
+    //   * fits within the current capacity,
+    //   * has been seen at least [insertionThreshold] times,
+    // we synthesise an Insert with Literal Name instruction. The
+    // subsequent resolution pass picks the new entry up as a dynamic
+    // full match, so the on-wire representation shrinks to a one- or
+    // two-byte indexed reference on this and every future block.
+    if (_dyn.capacity > 0) {
+      for (final h in headers) {
+        final key = '${String.fromCharCodes(h.name)}\u0000'
+            '${String.fromCharCodes(h.value)}';
+        final freq = (_pairFreq[key] ?? 0) + 1;
+        _pairFreq[key] = freq;
+        if (freq < insertionThreshold) continue;
+        if (lookupStatic(h.name, h.value) case (_, true)) continue;
+        if (_dyn.findFullMatch(h.name, h.value) != null) continue;
+        // RFC 9204 §3.2.1: the encoder MUST NOT insert an entry that
+        // would exceed the current capacity. `_DynamicTable.insert`
+        // already enforces this and returns false.
+        insertLiteral(h.name, h.value);
+      }
+    }
+
     // First pass: resolve representations and track the highest
     // dynamic absolute index we end up referencing so the block prefix
     // can carry the right Required Insert Count.
