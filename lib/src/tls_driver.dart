@@ -25,6 +25,7 @@ import 'crypto.dart' show Algorithm;
 import 'handshake_keys.dart';
 import 'packet_type.dart';
 import 'resumption.dart' show ResumptionState, SessionTicket;
+import 'ticket_store.dart';
 import 'tls_handshake.dart';
 import 'transport_params.dart';
 
@@ -56,16 +57,28 @@ class TlsServerDriver {
   bool _processedCh = false;
   bool _sentFlight = false;
   bool _completedHandshake = false;
+  bool _zeroRttAccepted = false;
+  Algorithm? _earlyAlg;
+  Uint8List? _earlyClientTrafficSecret;
   Uint8List? _shBytes;
   Uint8List? _flightBytes;
   Uint8List? _sharedSecret;
   HandshakeSecrets? secrets;
+
+  /// Optional in-memory ticket store. When non-null, the server will
+  /// attempt to accept 0-RTT by looking up the first `pre_shared_key`
+  /// identity offered in the ClientHello, validating its binder, and
+  /// installing early-data decryption keys via
+  /// [Connection.enableZeroRttRecv]. Issuing NewSessionTicket and
+  /// populating the store is the embedding application's job.
+  final TicketStore? ticketStore;
 
   TlsServerDriver({
     required this.conn,
     required this.serverCert,
     required this.originalDcid,
     TlsServerHandshake? tls,
+    this.ticketStore,
   }) : tls = tls ?? TlsServerHandshake();
 
   /// True once the server has finished installing handshake-traffic +
@@ -78,6 +91,10 @@ class TlsServerDriver {
   /// True once the client Finished has been verified and Initial keys
   /// have been dropped (RFC 9001 §4.9.1).
   bool get handshakeComplete => _completedHandshake;
+
+  /// True if the server validated a PSK binder on the incoming
+  /// ClientHello and installed early-data decryption keys.
+  bool get zeroRttAccepted => _zeroRttAccepted;
 
   /// Advance the TLS state machine as far as available CRYPTO bytes
   /// permit. Returns true if any transition occurred.
@@ -138,6 +155,8 @@ class TlsServerDriver {
             conn.applyPeerTransportParams(peerTp);
           }
 
+          _maybeAcceptZeroRtt();
+
           _processedCh = true;
           advanced = true;
         }
@@ -194,6 +213,17 @@ class TlsServerDriver {
       );
       secrets = s2;
       conn.spaces.installApplicationKeys(s2, isServer: true);
+      // RFC 9001 §4.6: keep the 0-RTT Open until the client's
+      // Finished proves it has transitioned to 1-RTT, so re-apply the
+      // early-data Open that the post-server-finished install just
+      // clobbered. The 1-RTT Open is reinstalled when the client
+      // Finished is processed below.
+      if (_zeroRttAccepted) {
+        conn.enableZeroRttRecv(
+          alg: _earlyAlg!,
+          clientEarlyTrafficSecret: _earlyClientTrafficSecret!,
+        );
+      }
       conn.processBufferedPackets();
       conn.spaces
           .crypto(Epoch.handshake)
@@ -242,6 +272,67 @@ class TlsServerDriver {
     }
 
     return advanced;
+  }
+
+  /// Inspect the just-parsed ClientHello for a `pre_shared_key` +
+  /// `early_data` offer. If [ticketStore] holds a matching, fresh
+  /// entry and the first binder validates, derive the
+  /// client_early_traffic_secret and install the early-data Open on
+  /// the application epoch via [Connection.enableZeroRttRecv].
+  ///
+  /// Failures (missing store, identity miss, expired entry, binder
+  /// mismatch) silently fall back to a full handshake — the peer
+  /// will simply receive no EE `early_data` extension and discard
+  /// its 0-RTT packets per RFC 9001 §4.6.
+  void _maybeAcceptZeroRtt() {
+    final store = ticketStore;
+    if (store == null) return;
+    final ch = tls.peerClientHello;
+    if (ch == null) return;
+    final ppsk = ch.parsedPreSharedKey;
+    if (ppsk == null || ppsk.identities.isEmpty) return;
+    if (!ch.offeredEarlyData) return;
+
+    final entry = store.lookup(ppsk.identities.first.identity);
+    if (entry == null || !entry.supportsEarlyData) return;
+
+    final psk = HandshakeSecrets.pskFromResumptionSecret(
+      entry.alg,
+      entry.resumptionMasterSecret,
+      entry.ticketNonce,
+    );
+
+    // RFC 8446 §4.2.11.2: binder transcript is the wire ClientHello
+    // prefix that stops at the start of the binders_list_length field.
+    final chWire = tls.peerClientHelloBytes!;
+    final truncated = Uint8List.sublistView(
+      chWire,
+      0,
+      4 + ppsk.bindersListOffsetInBody,
+    );
+    final expected = HandshakeSecrets.pskBinder(
+      alg: entry.alg,
+      psk: psk,
+      truncatedClientHello: truncated,
+    );
+    if (!_constantTimeEq(ppsk.binders.first, expected)) return;
+
+    // Early secret is HKDF-Extract(0, PSK); the full CH is in the
+    // transcript when deriving c_e_traffic (RFC 8446 §7.1).
+    final earlySecret = HandshakeSecrets.earlySecretFromPsk(entry.alg, psk);
+    final transcriptAfterCh = HandshakeSecrets.transcriptHash(
+      chWire,
+      alg: entry.alg,
+    );
+    final cets = HandshakeSecrets.clientEarlyTrafficSecret(
+      entry.alg,
+      earlySecret,
+      transcriptAfterCh,
+    );
+    conn.enableZeroRttRecv(alg: entry.alg, clientEarlyTrafficSecret: cets);
+    _earlyAlg = entry.alg;
+    _earlyClientTrafficSecret = cets;
+    _zeroRttAccepted = true;
   }
 }
 
