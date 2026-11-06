@@ -31,7 +31,10 @@ void main() {
     final rms =
         Uint8List.fromList(List<int>.generate(32, (i) => 0x55 ^ i));
     const alg = Algorithm.aes128Gcm;
-    final issuedAt = DateTime.utc(2026, 6, 3, 10, 0);
+    // Relative to real time: the server's TicketStore.lookup evicts entries
+    // older than their lifetime using DateTime.now(), so a fixed past instant
+    // would make this ticket stale. Issue it "now" to keep it fresh.
+    final issuedAt = DateTime.now();
 
     // ---- Pristine connections + drivers ----
     final dcid = Uint8List.fromList(const [
@@ -108,6 +111,8 @@ void main() {
     //    the Initial datagram.
     clientDriver.start();
     final c2sInitial = clientConn.send(Epoch.initial)!;
+    // Keep a pristine copy: recv() decrypts in place.
+    final c2sInitialReplay = Uint8List.fromList(c2sInitial);
 
     // 2) Server consumes the Initial; _maybeAcceptZeroRtt sees the
     //    PSK offer, looks up the ticket, validates the binder, and
@@ -154,5 +159,26 @@ void main() {
     final rx0Rtt = serverConn.recv(c2sZeroRtt);
     expect(rx0Rtt.epoch, Epoch.application);
     expect(serverConn.streamRecv(0, Uint8List(64)).$1, 16);
+
+    // 6) Anti-replay (RFC 8446 §8.1): the ticket is single-use. A fresh
+    //    server sharing the same — now consumed — TicketStore must reject a
+    //    replay of the identical Initial and fall back to a full handshake.
+    final serverConn2 = Connection(localCid: serverScid, isServer: true)
+      ..spaces.installInitialKeys(
+        cid: dcid,
+        version: protocolVersionV1,
+        isServer: true,
+      );
+    final serverDriver2 = TlsServerDriver(
+      conn: serverConn2,
+      serverCert: cert,
+      originalDcid: dcid,
+      ticketStore: store,
+    );
+    final rx2 = serverConn2.recv(c2sInitialReplay);
+    serverConn2.peerCid = rx2.sourceCid!.bytes;
+    expect(serverDriver2.poll(), isTrue);
+    expect(serverDriver2.zeroRttAccepted, isFalse,
+        reason: 'single-use ticket was consumed; replay must not be accepted');
   });
 }

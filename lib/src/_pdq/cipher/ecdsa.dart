@@ -46,6 +46,18 @@ bool ecdsaVerify2(
   return result;
 }
 
+/// Verifies an ECDSA P-384 (DER) signature over the pre-computed [hash]
+/// using the raw uncompressed (`0x04 || X || Y`) public key. Used for CA
+/// certificates signed with ecdsa-with-SHA384.
+bool ecdsaVerifyP384(
+  List<int> publicKeyBytes,
+  List<int> hash,
+  List<int> signatureBytes,
+) {
+  final pub = PublicKey.fromHex(getP384(), HEX.encode(publicKeyBytes));
+  return verify(pub, hash, Signature.fromASN1(signatureBytes));
+}
+
 void main() {
   var ec = getP256();
   var priv = ec.generatePrivateKey();

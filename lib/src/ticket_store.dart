@@ -79,6 +79,18 @@ class TicketStore {
     return e;
   }
 
+  /// Atomically look up and remove an entry (RFC 8446 §8.1 single-use
+  /// tickets): the returned entry can be used to accept exactly one
+  /// 0-RTT attempt, and any replay of the same identity misses. Returns
+  /// null if absent or stale.
+  TicketStoreEntry? consume(Uint8List identity, {DateTime? now}) {
+    final k = _key(identity);
+    final e = _byIdentity.remove(k);
+    if (e == null) return null;
+    if (!e.isFresh(now: now)) return null;
+    return e;
+  }
+
   /// Remove all entries.
   void clear() => _byIdentity.clear();
 

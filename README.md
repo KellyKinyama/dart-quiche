@@ -6,7 +6,7 @@ loss recovery, congestion control, flow control, HTTP/3 framing, QPACK
 and WebTransport are all implemented in Dart on top of
 [pointycastle](https://pub.dev/packages/pointycastle).
 
-**HEAD:** `cb60fce` (main) · **Tests:** 486/486 unit · **Interop:** 9/9
+**HEAD:** `cb60fce` (main) · **Tests:** 520/520 unit · **Interop:** 9/9
 public-Internet HTTP/3 servers reachable.
 
 See [doc/QUICHE_COMPARISON.md](doc/QUICHE_COMPARISON.md) for the
@@ -21,8 +21,18 @@ Wire & transport (RFC 9000 / 9001):
   headers, coalesced datagrams, variable-length packet numbers,
   Version Negotiation, Retry (build + integrity verify).
 - TLS 1.3 with `TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384` and
-  `TLS_CHACHA20_POLY1305_SHA256`; X25519 ECDHE; ECDSA-P256-SHA256 and
-  RSA-PSS-RSAE-SHA256 signature verification.
+  `TLS_CHACHA20_POLY1305_SHA256`; X25519 ECDHE; `CertificateVerify` via
+  ECDSA-P256-SHA256 and RSA-PSS-RSAE-SHA256.
+- Certificate validation: leaf SAN / hostname match, `notBefore` /
+  `notAfter` validity window (RFC 5280 §4.1.2.5), and opt-in
+  chain-to-root path validation through a `TrustStore` (ECDSA-P256 /
+  P-384 and RSA-PKCS1-SHA256 / SHA384 CA signatures).
+- Server certificates: present either an **ECDSA P-256** or an **RSA**
+  leaf (CA-issued RSA, e.g. DigiCert, included) — the server signs
+  `CertificateVerify` with ECDSA-P256-SHA256 or `rsa_pss_rsae_sha256`
+  accordingly, and sends the full chain (leaf + intermediates).
+  `loadServerCertFromPem` loads a PEM cert/key and auto-detects the key
+  type; `loadEcdsaCertFromPem` / `loadRsaCertFromPem` pick it explicitly.
 - 0-RTT (early data) end-to-end in-process: PSK binder, `pre_shared_key`
   + `early_data` ClientHello, long-header 0-RTT send, server-side
   binder validation and early-data key install. Public-Internet probe
@@ -51,14 +61,15 @@ Tooling:
 - qlog (NDJSON + in-memory sinks) on the packet-sent path, shape
   compatible with cloudflare/quiche's qlog crate so traces drop
   straight into qvis.
-- Self-signed P-256 cert generator for local testing.
+- Self-signed P-256 cert generator for local testing; `TrustStore` for
+  configuring trust anchors.
 
 ## What's not in the box yet
 
-- **PKI chain validation against a system trust store.** Leaf SAN
-  and `CertificateVerify` signature are checked; chain-to-root is
-  not. A MITM with a self-signed leaf for the same SNI would not
-  be caught.
+- **System trust store integration.** Chain-to-root validation is
+  implemented (`TrustStore` + `validateCertChain`), but trust anchors
+  must be supplied explicitly — there is no automatic load of the OS /
+  platform root store yet.
 - **Public-Internet 0-RTT against Cloudflare** — the binder is
   currently rejected by `cloudflare-quic.com` (in-process e2e test
   is green; investigation ongoing).
@@ -75,16 +86,26 @@ lib/src/connection.dart     QUIC Connection state machine
 lib/src/h3_connection.dart  HTTP/3 connection + control streams
 lib/src/qpack.dart          QPACK encoder + decoder
 lib/src/tls_driver.dart     TLS 1.3 client/server drivers
+lib/src/cert_chain.dart     TrustStore + chain-to-root validation
+lib/src/cert_utils.dart     Cert parse / validity / signature verify
 lib/src/{cubic,reno,...}    Congestion controllers
 bin/echo_server.dart        Minimal raw-QUIC echo server
 bin/h3_server.dart          Minimal HTTP/3 server
 bin/public_probe.dart       Live-Internet H3 GET probe
 bin/public_probe_0rtt.dart  Two-connection 0-RTT harvest + replay
 bin/interop_*.dart          Interop smoke harnesses
-test/                       486 unit tests
+test/                       520 unit tests
 doc/QUICHE_COMPARISON.md    Feature parity vs Rust quiche
 doc/INTEROP.md              Live-server interop matrix
 ```
+
+Certificate / security hardening is covered by dedicated suites:
+`test/cert_chain_test.dart` (chain-to-root path validation),
+`test/cert_validity_test.dart` (`notBefore` / `notAfter` windows),
+`test/rsa_pkcs1_verify_test.dart` (RSA-PKCS1 CA signatures),
+`test/fuzz_parsers_test.dart` (malformed DER / frame fuzzing),
+`test/ticket_store_test.dart` (single-use session tickets), and
+`test/zero_rtt_e2e_test.dart` (0-RTT replay rejection).
 
 ## Running the tests
 

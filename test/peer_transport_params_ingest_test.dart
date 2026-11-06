@@ -69,7 +69,7 @@ void main() {
   const tpClientMaxIdleTimeout = 30000;
   const tpInitialMaxData = 1 << 20;
   const tpInitialMaxStreamData = 1 << 18;
-  const tpInitialMaxStreams = 16;
+  const tpInitialMaxStreams = 128;
   const tpActiveConnIdLimit = 4;
   const tpMaxDatagramFrameSize = 65527;
 

@@ -154,6 +154,7 @@
 // }
 
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:basic_utils/basic_utils.dart';
@@ -161,6 +162,7 @@ import 'package:crypto/crypto.dart' as crypto;
 import 'package:elliptic/elliptic.dart' as elliptic;
 import 'package:hex/hex.dart';
 import 'package:pointycastle/asn1.dart';
+import 'package:pointycastle/export.dart' as pc;
 
 import 'ecdsa.dart';
 import 'fingerprint.dart';
@@ -170,35 +172,17 @@ import 'hash.dart';
 /// Decode PEM -> DER
 /// ------------------------------------------------------------
 Uint8List decodePemToDer(String pem) {
-  const startsWith = [
-    '-----BEGIN PUBLIC KEY-----',
-    '-----BEGIN PRIVATE KEY-----',
-    '-----BEGIN CERTIFICATE-----',
-    '-----BEGIN EC PRIVATE KEY-----',
-  ];
-
-  const endsWith = [
-    '-----END PUBLIC KEY-----',
-    '-----END PRIVATE KEY-----',
-    '-----END CERTIFICATE-----',
-    '-----END EC PRIVATE KEY-----',
-  ];
-
-  for (final s in startsWith) {
-    if (pem.startsWith(s)) {
-      pem = pem.substring(s.length);
-    }
+  // Robustly extract the base64 body between the BEGIN and END armor lines,
+  // tolerant of CRLF, leading/trailing blank lines, and a missing trailing
+  // newline (any of which otherwise leaks the END marker into base64.decode).
+  final begin = pem.indexOf('-----BEGIN');
+  if (begin >= 0) {
+    final afterBegin = pem.indexOf('\n', begin);
+    if (afterBegin >= 0) pem = pem.substring(afterBegin + 1);
   }
-
-  for (final s in endsWith) {
-    if (pem.endsWith(s)) {
-      pem = pem.substring(0, pem.length - s.length);
-    }
-  }
-
-  pem = pem.replaceAll('\n', '');
-  pem = pem.replaceAll('\r', '');
-
+  final end = pem.indexOf('-----END');
+  if (end >= 0) pem = pem.substring(0, end);
+  pem = pem.replaceAll(RegExp(r'\s'), '');
   return Uint8List.fromList(base64.decode(pem));
 }
 
@@ -206,16 +190,28 @@ Uint8List decodePemToDer(String pem) {
 /// Local certificate model used by the QUIC server
 /// ------------------------------------------------------------
 class EcdsaCert {
-  Uint8List cert; // DER certificate
-  Uint8List privateKey; // Raw private key scalar (32 bytes)
-  Uint8List publickKey; // Raw public key (0x04 || X || Y)
+  Uint8List cert; // DER certificate (leaf)
+  Uint8List privateKey; // Raw EC private key scalar (empty for RSA certs)
+  Uint8List publickKey; // Raw EC public key 0x04||X||Y (empty for RSA certs)
   Uint8List fingerPrint; // SHA-256(cert DER)
+
+  /// When non-null this is an RSA leaf certificate: the server signs its
+  /// TLS 1.3 CertificateVerify with RSASSA-PSS (`rsa_pss_rsae_sha256`) using
+  /// this key instead of ECDSA P-256.
+  pc.RSAPrivateKey? rsaPrivateKey;
+
+  /// Intermediate certificate DERs sent after the leaf so a peer can build a
+  /// path to a trusted root (public CAs like DigiCert chain via one or more
+  /// intermediates).
+  List<Uint8List> chain;
 
   EcdsaCert({
     required this.privateKey,
     required this.publickKey,
     required this.cert,
     required this.fingerPrint,
+    this.rsaPrivateKey,
+    this.chain = const [],
   });
 }
 
@@ -360,6 +356,68 @@ ASN1Sequence _algorithmIdentifierEcdsaSha256() {
   // ecdsa-with-SHA256 = 1.2.840.10045.4.3.2
   return ASN1Sequence()
     ..add(ASN1ObjectIdentifier.fromIdentifierString('1.2.840.10045.4.3.2'));
+}
+
+/// Test-only: issue a P-256 X.509 certificate for [subjectPublicKey] under
+/// [subjectDn], signed by [issuerPrivateKey] as [issuerDn]. A CA certificate
+/// when [isCa]; [sans] (if any) populate the subjectAltName. Returns DER.
+///
+/// Intended for building multi-level chains (root -> intermediate -> leaf)
+/// in tests; it exercises the same ASN.1 path as the self-signed generator.
+Uint8List issueEcCertificateDer({
+  required ECPrivateKey issuerPrivateKey,
+  required Map<String, String> issuerDn,
+  required ECPublicKey subjectPublicKey,
+  required Map<String, String> subjectDn,
+  required bool isCa,
+  List<String> sans = const [],
+  DateTime? notBefore,
+  Duration lifetime = const Duration(days: 13),
+  int serial = 1,
+}) {
+  final tbs = ASN1Sequence();
+
+  final version = ASN1Object(tag: 0xA0);
+  version.valueBytes = ASN1Integer.fromtInt(2).encode();
+  tbs.add(version);
+
+  tbs.add(ASN1Integer.fromtInt(serial));
+
+  final sigAlg = _algorithmIdentifierEcdsaSha256();
+  tbs.add(sigAlg);
+
+  tbs.add(_buildName(issuerDn));
+
+  final start = (notBefore ?? DateTime.now().toUtc()).toUtc();
+  final validity = ASN1Sequence()
+    ..add(ASN1UtcTime(start))
+    ..add(ASN1UtcTime(start.add(lifetime)));
+  tbs.add(validity);
+
+  tbs.add(_buildName(subjectDn));
+
+  final spkiDer =
+      decodePemToDer(CryptoUtils.encodeEcPublicKeyToPem(subjectPublicKey));
+  tbs.add(ASN1Parser(spkiDer).nextObject());
+
+  final extensions = ASN1Sequence();
+  if (sans.isNotEmpty) extensions.add(_buildSubjectAltNameExtension(sans));
+  extensions.add(_buildBasicConstraintsExtension(cA: isCa));
+  final extObj = ASN1Object(tag: 0xA3);
+  extObj.valueBytes = extensions.encode();
+  tbs.add(extObj);
+
+  final tbsDer = tbs.encode();
+  final digest = Uint8List.fromList(crypto.sha256.convert(tbsDer).bytes);
+  final rawPriv = encodeECPrivateKeyToRaw(issuerPrivateKey);
+  final sig = Uint8List.fromList(ecdsaSign(rawPriv, digest));
+  final derSig = _ensureDerEncodedEcdsaSignature(sig);
+
+  final cert = ASN1Sequence()
+    ..add(tbs)
+    ..add(sigAlg)
+    ..add(ASN1BitString(stringValues: derSig));
+  return Uint8List.fromList(cert.encode());
 }
 
 ASN1Sequence _buildName(Map<String, String> dn) {
@@ -633,6 +691,81 @@ EcdsaCert loadEcdsaCertFromPemStrings({
     cert: certDer,
     fingerPrint: fingerPrint,
   );
+}
+
+/// Splits a PEM bundle into its individual certificate DERs in file order
+/// (leaf first for a conventional `fullchain.pem`).
+List<Uint8List> splitPemCertificates(String pem) {
+  const begin = '-----BEGIN CERTIFICATE-----';
+  const end = '-----END CERTIFICATE-----';
+  final out = <Uint8List>[];
+  var i = pem.indexOf(begin);
+  while (i >= 0) {
+    final j = pem.indexOf(end, i);
+    if (j < 0) break;
+    out.add(decodePemToDer(pem.substring(i, j + end.length)));
+    i = pem.indexOf(begin, j + end.length);
+  }
+  return out;
+}
+
+/// Parses an RSA private key from PKCS#8 (`BEGIN PRIVATE KEY`) or PKCS#1
+/// (`BEGIN RSA PRIVATE KEY`) PEM.
+pc.RSAPrivateKey parseRsaPrivateKeyPem(String pem) {
+  if (pem.contains('BEGIN RSA PRIVATE KEY')) {
+    return CryptoUtils.rsaPrivateKeyFromPemPkcs1(pem);
+  }
+  return CryptoUtils.rsaPrivateKeyFromPem(pem);
+}
+
+/// Loads an RSA leaf certificate (+ optional intermediates) and its private
+/// key for serving. [certPem] may be a single leaf or a full-chain bundle;
+/// any [intermediatesPem] blocks are appended to the chain after it.
+EcdsaCert loadRsaCertFromPemStrings({
+  required String certPem,
+  required String privateKeyPem,
+  List<String> intermediatesPem = const [],
+}) {
+  final certs = splitPemCertificates(certPem);
+  if (certs.isEmpty) {
+    throw ArgumentError('no certificate found in certPem');
+  }
+  final leaf = certs.first;
+  final chain = <Uint8List>[...certs.skip(1)];
+  for (final pem in intermediatesPem) {
+    chain.addAll(splitPemCertificates(pem));
+  }
+  final key = parseRsaPrivateKeyPem(privateKeyPem);
+  final fingerPrint = createHash(leaf);
+  return EcdsaCert(
+    privateKey: Uint8List(0),
+    publickKey: Uint8List(0),
+    cert: leaf,
+    fingerPrint: fingerPrint,
+    rsaPrivateKey: key,
+    chain: chain,
+  );
+}
+
+final Random _pssSaltRng = Random.secure();
+
+/// Signs [message] with RSASSA-PSS (SHA-256 content + MGF1, 32-byte salt) —
+/// the `rsa_pss_rsae_sha256` scheme TLS 1.3 uses for CertificateVerify. The
+/// PSS signer hashes [message] internally, so pass the unhashed input.
+Uint8List rsaPssSha256Sign(pc.RSAPrivateKey key, Uint8List message) {
+  final signer =
+      pc.PSSSigner(pc.RSAEngine(), pc.SHA256Digest(), pc.SHA256Digest());
+  final salt = Uint8List.fromList(
+    List<int>.generate(32, (_) => _pssSaltRng.nextInt(256)),
+  );
+  signer.init(
+    true,
+    pc.ParametersWithSalt(
+      pc.PrivateKeyParameter<pc.RSAPrivateKey>(key),
+      salt,
+    ),
+  );
+  return signer.generateSignature(message).bytes;
 }
 
 const String kPinnedServerCertPem = r'''-----BEGIN CERTIFICATE-----

@@ -187,8 +187,8 @@ ClientHello buildInitialClientHello({
     ..add(_tpInt(tpInitialMaxStreamDataBidiLocal, 1 << 18))
     ..add(_tpInt(tpInitialMaxStreamDataBidiRemote, 1 << 18))
     ..add(_tpInt(tpInitialMaxStreamDataUni, 1 << 18))
-    ..add(_tpInt(tpInitialMaxStreamsBidi, 16))
-    ..add(_tpInt(tpInitialMaxStreamsUni, 16))
+    ..add(_tpInt(tpInitialMaxStreamsBidi, 128))
+    ..add(_tpInt(tpInitialMaxStreamsUni, 128))
     ..add(_tpInt(tpActiveConnectionIdLimit, 4))
     // Enables QUIC DATAGRAM (RFC 9221) in the client->server direction.
     // Without this, peers MUST NOT send DATAGRAM frames to this client,

@@ -17,6 +17,7 @@ export 'src/connection.dart';
 export 'src/crypto.dart';
 export 'src/crypto_context.dart';
 export 'src/cert_utils.dart';
+export 'src/cert_chain.dart';
 export 'src/cubic.dart';
 export 'src/delivery_rate.dart';
 export 'src/dgram.dart';

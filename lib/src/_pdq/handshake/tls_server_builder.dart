@@ -31,6 +31,8 @@ const int x25519Group = 0x001d;
 // TLS 1.3 signature algorithm
 // ecdsa_secp256r1_sha256
 const int ecdsaP256Sha256 = 0x0403;
+// rsa_pss_rsae_sha256
+const int rsaPssRsaeSha256 = 0x0804;
 
 // QUIC transport parameter IDs (RFC 9000)
 const int tpInitialMaxData = 0x0004;
@@ -224,8 +226,11 @@ Uint8List buildQuicTransportParameters({
     ..._tp(tpInitialMaxStreamDataBidiLocal, 1 << 18),
     ..._tp(tpInitialMaxStreamDataBidiRemote, 1 << 18),
     ..._tp(tpInitialMaxStreamDataUni, 1 << 18),
-    ..._tp(tpInitialMaxStreamsBidi, 16),
-    ..._tp(tpInitialMaxStreamsUni, 16),
+    // Modest initial stream grant; Connection.send() replenishes it via
+    // MAX_STREAMS as the peer opens streams (one bidi stream per request).
+    // MUST match Connection._initialLocalMaxStreams.
+    ..._tp(tpInitialMaxStreamsBidi, 128),
+    ..._tp(tpInitialMaxStreamsUni, 128),
   ]);
 }
 
@@ -473,13 +478,22 @@ Uint8List buildServerCertificateVerify({
     transcriptHash: transcriptHash,
   );
 
-  // For ecdsa_secp256r1_sha256, sign SHA-256 over the CertificateVerify input
-  final hash = crypto.sha256.convert(toBeSigned).bytes;
-
-  Uint8List signature = Uint8List.fromList(ecdsaSign(cert.privateKey, hash));
-
-  // TLS requires ASN.1 DER encoding for ECDSA signatures
-  signature = _ensureDerEncodedEcdsaSignature(signature);
+  final int sigScheme;
+  Uint8List signature;
+  final rsaKey = cert.rsaPrivateKey;
+  if (rsaKey != null) {
+    // RSASSA-PSS signs the *unhashed* CertificateVerify input; the PSS
+    // signer applies SHA-256 internally.
+    signature = rsaPssSha256Sign(rsaKey, toBeSigned);
+    sigScheme = rsaPssRsaeSha256;
+  } else {
+    // For ecdsa_secp256r1_sha256, sign SHA-256 over the CertificateVerify input
+    final hash = crypto.sha256.convert(toBeSigned).bytes;
+    signature = Uint8List.fromList(ecdsaSign(cert.privateKey, hash));
+    // TLS requires ASN.1 DER encoding for ECDSA signatures
+    signature = _ensureDerEncodedEcdsaSignature(signature);
+    sigScheme = ecdsaP256Sha256;
+  }
 
   final bodyLen = 2 + 2 + signature.length;
 
@@ -489,9 +503,9 @@ Uint8List buildServerCertificateVerify({
     (bodyLen >> 8) & 0xff,
     bodyLen & 0xff,
 
-    // signature_algorithm = ecdsa_secp256r1_sha256
-    (ecdsaP256Sha256 >> 8) & 0xff,
-    ecdsaP256Sha256 & 0xff,
+    // signature_algorithm (ecdsa_secp256r1_sha256 or rsa_pss_rsae_sha256)
+    (sigScheme >> 8) & 0xff,
+    sigScheme & 0xff,
 
     // signature vector length
     (signature.length >> 8) & 0xff,
@@ -541,7 +555,10 @@ ServerHandshakeArtifacts buildServerHandshakeArtifacts({
     ),
   ]);
 
-  final cert = buildCertificate([CertificateEntry(cert: serverCert.cert)]);
+  final cert = buildCertificate([
+    CertificateEntry(cert: serverCert.cert),
+    for (final c in serverCert.chain) CertificateEntry(cert: c),
+  ]);
 
   final extractedCertDer = _extractFirstCertDerFromCertificateHandshake(cert);
 

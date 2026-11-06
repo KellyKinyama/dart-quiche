@@ -71,16 +71,16 @@ void _ship(Connection from, Connection to) {
 void main() {
   test('inbound MAX_STREAMS_BIDI raises peerMaxStreamsBidi monotonically', () {
     final h = _handshake();
-    // Peer's transport parameters seed bidi=16 on connect.
-    expect(h.client.peerMaxStreamsBidi, 16);
-    h.server.queueFrameForTest(const MaxStreamsBidiFrame(100));
+    // Peer's transport parameters seed bidi=128 on connect.
+    expect(h.client.peerMaxStreamsBidi, 128);
+    h.server.queueFrameForTest(const MaxStreamsBidiFrame(200));
     _ship(h.server, h.client);
-    expect(h.client.peerMaxStreamsBidi, 100);
+    expect(h.client.peerMaxStreamsBidi, 200);
 
     // A lower MAX_STREAMS must not lower the cap.
-    h.server.queueFrameForTest(const MaxStreamsBidiFrame(50));
+    h.server.queueFrameForTest(const MaxStreamsBidiFrame(150));
     _ship(h.server, h.client);
-    expect(h.client.peerMaxStreamsBidi, 100);
+    expect(h.client.peerMaxStreamsBidi, 200);
 
     // A higher one raises it.
     h.server.queueFrameForTest(const MaxStreamsBidiFrame(500));
@@ -90,11 +90,11 @@ void main() {
 
   test('inbound MAX_STREAMS_UNI updates peerMaxStreamsUni', () {
     final h = _handshake();
-    // Peer's transport parameters seed uni=16 on connect.
-    expect(h.client.peerMaxStreamsUni, 16);
-    h.server.queueFrameForTest(const MaxStreamsUniFrame(64));
+    // Peer's transport parameters seed uni=128 on connect.
+    expect(h.client.peerMaxStreamsUni, 128);
+    h.server.queueFrameForTest(const MaxStreamsUniFrame(256));
     _ship(h.server, h.client);
-    expect(h.client.peerMaxStreamsUni, 64);
+    expect(h.client.peerMaxStreamsUni, 256);
   });
 
   test('inbound NEW_TOKEN queues tokens for the application', () {

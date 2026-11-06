@@ -21,6 +21,74 @@ export 'package:dart_quiche/src/_pdq/cipher/cert_utils.dart'
 /// Subject CN is `127.0.0.1` and the SAN includes `127.0.0.1` + `localhost`.
 cu.EcdsaCert generateSelfSignedP256Cert() => cu.generateSelfSignedCertificate();
 
+/// Loads an ECDSA P-256 certificate + private key from PEM strings into an
+/// [cu.EcdsaCert] (DER cert + raw keys), for serving real certificates.
+/// PEMs are trimmed so trailing newlines (common in real files) are tolerated.
+cu.EcdsaCert loadEcdsaCertFromPem({
+  required String certPem,
+  required String keyPem,
+}) =>
+    cu.loadEcdsaCertFromPemStrings(
+      certPem: certPem.trim(),
+      privateKeyPem: keyPem.trim(),
+    );
+
+/// Loads an RSA certificate (leaf or full-chain bundle) + private key from
+/// PEM strings for serving. The server signs TLS 1.3 CertificateVerify with
+/// `rsa_pss_rsae_sha256`. [certPem] may hold the leaf alone or the leaf
+/// followed by its intermediates; extra [intermediatesPem] blocks are
+/// appended to the chain. Supports PKCS#8 and PKCS#1 private keys.
+cu.EcdsaCert loadRsaCertFromPem({
+  required String certPem,
+  required String keyPem,
+  List<String> intermediatesPem = const [],
+}) =>
+    cu.loadRsaCertFromPemStrings(
+      certPem: certPem.trim(),
+      privateKeyPem: keyPem.trim(),
+      intermediatesPem: intermediatesPem,
+    );
+
+/// Loads a server certificate + key from PEM, auto-detecting RSA vs ECDSA
+/// P-256 from the private-key type: RSA keys yield an RSA-PSS-signing
+/// credential, EC keys an ECDSA P-256 one. Use this when the key type isn't
+/// known ahead of time (e.g. a CA-issued cert supplied by an operator).
+cu.EcdsaCert loadServerCertFromPem({
+  required String certPem,
+  required String keyPem,
+  List<String> intermediatesPem = const [],
+}) {
+  if (_keyPemIsRsa(keyPem)) {
+    return loadRsaCertFromPem(
+      certPem: certPem,
+      keyPem: keyPem,
+      intermediatesPem: intermediatesPem,
+    );
+  }
+  return loadEcdsaCertFromPem(certPem: certPem, keyPem: keyPem);
+}
+
+/// True if [keyPem] carries an RSA private key. PKCS#1 / SEC1 are decided by
+/// the PEM armor; PKCS#8 (`BEGIN PRIVATE KEY`) is decided by the
+/// `rsaEncryption` OID (1.2.840.113549.1.1.1) inside the DER.
+bool _keyPemIsRsa(String keyPem) {
+  if (keyPem.contains('BEGIN RSA PRIVATE KEY')) return true;
+  if (keyPem.contains('BEGIN EC PRIVATE KEY')) return false;
+  final der = cu.decodePemToDer(keyPem.trim());
+  const rsaOid = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+  for (var i = 0; i + rsaOid.length <= der.length; i++) {
+    var match = true;
+    for (var j = 0; j < rsaOid.length; j++) {
+      if (der[i + j] != rsaOid[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return true;
+  }
+  return false;
+}
+
 /// Verifies an ECDSA P-256 (DER) signature over [message] using the raw
 /// uncompressed (`0x04 || X || Y`) public key.
 bool verifyEcdsaP256({
@@ -28,6 +96,14 @@ bool verifyEcdsaP256({
   required Uint8List message,
   required Uint8List signature,
 }) => ec.ecdsaVerify(rawPublicKey, message, signature);
+
+/// Verifies an ECDSA P-384 (DER) signature over the pre-hashed [digest]
+/// using the raw uncompressed (`0x04 || X || Y`) P-384 public key.
+bool verifyEcdsaP384({
+  required Uint8List rawPublicKey,
+  required Uint8List digest,
+  required Uint8List signature,
+}) => ec.ecdsaVerifyP384(rawPublicKey, digest, signature);
 
 /// Parsed RSA public key: ASN.1 `RSAPublicKey ::= SEQUENCE { modulus
 /// INTEGER, publicExponent INTEGER }`.
@@ -145,6 +221,46 @@ bool verifyRsaPssSha256({
     return false;
   }
 }
+
+/// Verifies an RSASSA-PKCS1-v1_5 signature over [message] under [pubKey],
+/// hashing [message] with SHA-256 (CA certs signed with
+/// `sha256WithRSAEncryption`, OID 1.2.840.113549.1.1.11).
+bool verifyRsaPkcs1Sha256({
+  required RsaPublicKey pubKey,
+  required Uint8List message,
+  required Uint8List signature,
+}) =>
+    _verifyRsaPkcs1(pubKey, message, signature, pc.SHA256Digest(),
+        '0609608648016503040201');
+
+/// Verifies an RSASSA-PKCS1-v1_5 signature over [message] under [pubKey],
+/// hashing [message] with SHA-384 (`sha384WithRSAEncryption`, OID
+/// 1.2.840.113549.1.1.12).
+bool verifyRsaPkcs1Sha384({
+  required RsaPublicKey pubKey,
+  required Uint8List message,
+  required Uint8List signature,
+}) =>
+    _verifyRsaPkcs1(pubKey, message, signature, pc.SHA384Digest(),
+        '0609608648016503040202');
+
+bool _verifyRsaPkcs1(
+  RsaPublicKey pubKey,
+  Uint8List message,
+  Uint8List signature,
+  pc.Digest digest,
+  String digestIdentifierHex,
+) {
+  final pcKey = pc.RSAPublicKey(pubKey.modulus, pubKey.exponent);
+  final signer = pc.RSASigner(digest, digestIdentifierHex)
+    ..init(false, pc.PublicKeyParameter<pc.RSAPublicKey>(pcKey));
+  try {
+    return signer.verifySignature(message, pc.RSASignature(signature));
+  } catch (_) {
+    return false;
+  }
+}
+
 
 /// All `subjectAltName` entries from an X.509 certificate DER, split
 /// into DNS names (lowercased) and raw IP-address byte strings (4 bytes
@@ -278,6 +394,69 @@ List<int>? _parseIPv4(String s) {
   return out;
 }
 
+/// Parses the certificate's validity window (`notBefore` / `notAfter`),
+/// supporting ASN.1 UTCTime and GeneralizedTime in the standard `...Z`
+/// (UTC) form that X.509 mandates (RFC 5280 §4.1.2.5).
+({DateTime notBefore, DateTime notAfter}) extractCertValidity(
+  Uint8List certDer,
+) {
+  final certSeq = _derChildren(_derRead(certDer, 0));
+  final tbs = _derChildren(certSeq[0]);
+  // TBSCertificate: [version [0] EXPLICIT]? serialNumber, signature, issuer,
+  // validity, subject, spki, ... — skip the optional version to land on the
+  // validity SEQUENCE (serial, signature, issuer, THEN validity).
+  var idx = 0;
+  if (tbs.isNotEmpty && tbs[0].tag == 0xA0) idx = 1;
+  final validity = tbs[idx + 3];
+  if (validity.tag != 0x30) {
+    throw StateError('expected validity SEQUENCE, got tag ${validity.tag}');
+  }
+  final times = _derChildren(validity);
+  if (times.length < 2) {
+    throw StateError('validity needs notBefore + notAfter');
+  }
+  return (
+    notBefore: _parseAsn1Time(times[0]),
+    notAfter: _parseAsn1Time(times[1]),
+  );
+}
+
+/// True if [now] (default `DateTime.now()`, compared in UTC) falls within
+/// the certificate's `notBefore .. notAfter` window.
+bool certIsCurrentlyValid(Uint8List certDer, {DateTime? now}) {
+  final v = extractCertValidity(certDer);
+  final t = (now ?? DateTime.now()).toUtc();
+  return !t.isBefore(v.notBefore) && !t.isAfter(v.notAfter);
+}
+
+DateTime _parseAsn1Time(_DerTlv tlv) {
+  final s = String.fromCharCodes(tlv.value);
+  // UTCTime (0x17): YYMMDDHHMMSSZ; GeneralizedTime (0x18): YYYYMMDDHHMMSSZ.
+  if (tlv.tag == 0x17) {
+    if (s.length < 13 || !s.endsWith('Z')) {
+      throw StateError('unsupported UTCTime "$s"');
+    }
+    final yy = int.parse(s.substring(0, 2));
+    return _mkUtc(yy < 50 ? 2000 + yy : 1900 + yy, s, 2);
+  }
+  if (tlv.tag == 0x18) {
+    if (s.length < 15 || !s.endsWith('Z')) {
+      throw StateError('unsupported GeneralizedTime "$s"');
+    }
+    return _mkUtc(int.parse(s.substring(0, 4)), s, 4);
+  }
+  throw StateError('unexpected ASN.1 time tag ${tlv.tag}');
+}
+
+DateTime _mkUtc(int year, String s, int o) => DateTime.utc(
+      year,
+      int.parse(s.substring(o, o + 2)),
+      int.parse(s.substring(o + 2, o + 4)),
+      int.parse(s.substring(o + 4, o + 6)),
+      int.parse(s.substring(o + 6, o + 8)),
+      int.parse(s.substring(o + 8, o + 10)),
+    );
+
 // --- Minimal DER TLV reader ---------------------------------------------
 
 class _DerTlv {
@@ -285,7 +464,6 @@ class _DerTlv {
   final Uint8List value;
   _DerTlv(this.tag, this.value);
 }
-
 /// Reads one DER TLV at [off]. Throws if truncated.
 _DerTlv _derRead(Uint8List buf, int off) {
   if (off + 2 > buf.length) {

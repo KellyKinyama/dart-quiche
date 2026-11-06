@@ -225,6 +225,8 @@ Future<void> main(List<String> args) async {
             if (req != null) respond(s, streamId, req);
           case H3SettingsEvent():
             print('  ← SETTINGS from peer');
+          case H3WebTransportUniStreamEvent():
+          case H3WebTransportBidiStreamEvent():
           case H3GoAwayEvent():
           case H3MaxPushIdEvent():
           case H3CancelPushEvent():

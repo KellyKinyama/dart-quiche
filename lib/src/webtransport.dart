@@ -390,6 +390,9 @@ class WebTransportSession {
   int openBidiStream() {
     final id = h3.allocLocalWtBidiStreamId();
     h3.conn.streamSend(id, encodeWtBidiStreamPrefix(streamId));
+    // So the peer's reply on this stream (which carries no prefix) is surfaced
+    // as WT bidi payload rather than parsed as H3 frames.
+    h3.registerLocalWtBidiStream(id, streamId);
     return id;
   }
 
