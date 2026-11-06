@@ -95,11 +95,19 @@ void main() {
     serverConn.peerCid =
         serverConn.recv(clientConn.send(Epoch.initial)!).sourceCid!.bytes;
     expect(serverDriver.poll(), isTrue);
+    // A real peer's padded Initial (1200 B) + Handshake ACK validate the
+    // address; in-process the CH isn't padded, so validate explicitly to
+    // avoid the anti-amplification cap gating this signing check.
+    serverConn.markAddressValidated();
 
-    // SH + Handshake(EE||Cert||CV) → client.
+    // SH + Handshake(EE||Cert||CV) → client. The RSA flight spans multiple
+    // MTU-sized packets, so drain them all (as the server's send loop does).
     clientConn.recv(serverConn.send(Epoch.initial)!);
     expect(clientDriver.poll(), isTrue);
-    clientConn.recv(serverConn.send(Epoch.handshake)!);
+    Uint8List? hp;
+    while ((hp = serverConn.send(Epoch.handshake)) != null) {
+      clientConn.recv(hp!);
+    }
     // Phase 2 verifies the RSA-PSS CertificateVerify; a bad signature throws.
     expect(clientDriver.poll(), isTrue);
     expect(clientDriver.handshakeComplete, isTrue);
@@ -114,5 +122,80 @@ void main() {
       clientDriver.secrets!.sHandshakeTraffic,
       serverDriver.secrets!.sHandshakeTraffic,
     );
+  });
+
+  test('large RSA cert chain splits the Handshake flight into MTU-sized packets',
+      () {
+    final m = _makeRsaCert();
+    // Inflate the Certificate message with extra intermediates so the
+    // Handshake flight spans several packets (mirrors a real leaf + CA
+    // chain, e.g. DigiCert leaf + intermediate).
+    final cert = loadRsaCertFromPem(
+      certPem: m.certPem,
+      keyPem: m.keyPem,
+      intermediatesPem: [m.certPem, m.certPem, m.certPem],
+    );
+    expect(cert.chain.length, 3);
+
+    final dcid = Uint8List.fromList(const [
+      0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08, //
+    ]);
+    final clientScid = Uint8List.fromList(const [
+      0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, //
+    ]);
+    final serverScid = Uint8List.fromList(const [
+      0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, //
+    ]);
+
+    final clientConn =
+        Connection(localCid: clientScid, isServer: false, peerCid: dcid)
+          ..spaces.installInitialKeys(
+            cid: dcid,
+            version: protocolVersionV1,
+            isServer: false,
+          );
+    final serverConn = Connection(localCid: serverScid, isServer: true)
+      ..spaces.installInitialKeys(
+        cid: dcid,
+        version: protocolVersionV1,
+        isServer: true,
+      );
+
+    final clientDriver = TlsClientDriver(conn: clientConn, hostname: 'localhost');
+    final serverDriver = TlsServerDriver(
+      conn: serverConn,
+      serverCert: cert,
+      originalDcid: dcid,
+    );
+
+    clientDriver.start();
+    serverConn.peerCid =
+        serverConn.recv(clientConn.send(Epoch.initial)!).sourceCid!.bytes;
+    expect(serverDriver.poll(), isTrue);
+
+    // Drop the anti-amplification cap so this check exercises packetization
+    // (a real peer validates the address via its Handshake ACK, which lifts
+    // the cap the same way).
+    serverConn.markAddressValidated();
+
+    // SH first, then drain the whole Handshake flight packet by packet.
+    clientConn.recv(serverConn.send(Epoch.initial)!);
+    expect(clientDriver.poll(), isTrue);
+
+    var handshakePackets = 0;
+    Uint8List? pkt;
+    while ((pkt = serverConn.send(Epoch.handshake)) != null) {
+      // RFC 9000 §14.1: every packet must fit the 1200-byte minimum MTU.
+      expect(pkt!.length, lessThanOrEqualTo(1200));
+      handshakePackets++;
+      clientConn.recv(pkt);
+    }
+    // A multi-KB RSA chain must span more than one packet (the bug was a
+    // single oversized datagram the wire silently dropped).
+    expect(handshakePackets, greaterThan(1));
+
+    // The client reassembled the split flight and completed the handshake.
+    expect(clientDriver.poll(), isTrue);
+    expect(clientDriver.handshakeComplete, isTrue);
   });
 }

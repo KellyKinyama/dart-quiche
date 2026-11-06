@@ -1107,7 +1107,7 @@ class Connection {
     final stream = cc.cryptoStream;
     if (stream.isFlushable()) {
       final off = stream.send.offFront();
-      final scratch = Uint8List(4096);
+      final scratch = Uint8List(_maxCryptoFramePayloadPerPacket);
       final (n, _) = stream.send.emit(scratch);
       if (n > 0) {
         cryptoFrame = CryptoFrame(
@@ -1704,6 +1704,16 @@ class Connection {
   /// bytes) per outgoing packet. Stays well under a typical 1200-byte
   /// QUIC MTU once header, AEAD tag, ACK and CRYPTO frames are added.
   static const int _streamFramesPayloadBudget = 1100;
+
+  /// Max CRYPTO payload emitted per packet. Keeps Initial/Handshake
+  /// packets within the 1200-byte QUIC minimum MTU (RFC 9000 §14.1) so a
+  /// large server flight — e.g. an RSA certificate chain (leaf +
+  /// intermediates) + RSA-PSS CertificateVerify — is split across several
+  /// on-wire packets instead of one oversized datagram that the path or
+  /// the peer's `max_udp_payload_size` would drop. The remaining CRYPTO
+  /// bytes stay flushable and drain on subsequent send() calls (the
+  /// anti-amplification cap reopens as the peer's packets arrive).
+  static const int _maxCryptoFramePayloadPerPacket = 1000;
 
   /// Hard cap on the number of distinct streams that may be packed into
   /// a single outgoing packet. Bounds frame-overhead amplification.
